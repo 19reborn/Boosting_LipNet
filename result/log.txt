@@ -1,0 +1,138 @@
+train_mode = train-diffAI
+dataset = cifar10
+net = None
+train_batch = 150
+test_batch = 150
+n_epochs = 200
+epochs = 0,50,0,150,200
+test_freq = 40
+test_set = test
+debug = False
+cert = True
+cert_trunk = True
+num_workers = 16
+start_epoch = 0
+print_freq = 50
+load_model = None
+opt = adam
+lr = 0.001
+wd = 0.0
+epsilon = 1e-10
+kappa = 1.0
+lr_sched = step_lr
+lr_step = 10
+lr_factor = 0.5
+lr_layer_dec = 0.5
+pct_up = 0.5
+loss = cross_entropy
+p_start = 8.0
+p_end = 1000.0
+nat_factor = 0.5
+relu_stable_cnt = 1
+relu_stable_type = tight
+relu_stable = None
+relu_stable_layer_dec = 1.0
+l1_reg = 1e-05
+l2_reg = 0.0
+reg_scale_conv = False
+mix = True
+mix_epochs = 100
+relu_stable_protected = 1
+n_attack_layers = 4
+protected_layers = 1
+visualize = False
+train_eps = 0.00784313725
+adv_type = pgd
+test_eps = 0.03137254901960784
+anneal = True
+anneal_epochs = 100
+anneal_pow = 1
+anneal_warmup = 0
+eps_factor = 1.05
+eps_scaling_mode = COLT
+start_eps_factor = 1.05
+train_att_n_steps = 8
+train_att_step_size = 0.25
+test_att_n_steps = 40
+test_att_step_size = 0.035
+n_rand_proj = 50
+beta_start = 0.0
+beta_end = 1.0
+beta1 = 0.9
+beta2 = 0.99
+exp_name = dev
+exp_id = 4
+no_cuda = False
+root_dir = ./
+result_dir = ./result/
+n_branches = 1
+train_trunk = False
+branch_nets = ['LipNet']
+gate_nets = None
+cert_net_dim = None
+load_branch_model = None
+load_gate_model = None
+load_trunk_model = None
+gate_feature_extraction = 1
+gate_type = net
+gate_mode = gate_init
+gate_threshold = 0.0
+gate_on_trunk = False
+retrain_branch = False
+exact_target_cert = False
+cotrain_entropy = None
+balanced_gate_loss = True
+sliding_loss_balance = 1.0
+gate_target_type = nat
+train_domain = ['box']
+train_domain_weights = {'box': 1.0}
+cert_domain = ['box']
+weighted_training = None
+eps_train = 3.884956719154051
+eps_test = 0.7772391089276951
+input_min = 0
+input_max = 1
+model_dir = ./models_new/cifar10/dev/4/None_0.00784/1623923093
+var_count = 246422027
+var_count_t = 246422027
+var_count_relu = 0
+Compose(
+    RandomCrop(size=(32, 32), padding=4)
+    RandomHorizontalFlip(p=0.5)
+    ToTensor()
+)
+Model(
+  (feature): MLPFeature(
+    (fc): ModuleList(
+      (0): NormDist(
+        in_features=3072, out_features=5120, bias=False
+        (normalize): MeanNorm(5120)
+      )
+      (1): NormDist(
+        in_features=5120, out_features=5120, bias=False
+        (normalize): MeanNorm(5120)
+      )
+      (2): NormDist(
+        in_features=5120, out_features=5120, bias=False
+        (normalize): MeanNorm(5120)
+      )
+      (3): NormDist(
+        in_features=5120, out_features=5120, bias=False
+        (normalize): MeanNorm(5120)
+      )
+      (4): NormDist(
+        in_features=5120, out_features=5120, bias=False
+        (normalize): MeanNorm(5120)
+      )
+    )
+  )
+  (predictor): Predictor(
+    (fc1): BoundLinear(in_features=5120, out_features=512, bias=True)
+    (tanh): BoundTanh()
+    (fc2): BoundFinalLinear(in_features=512, out_features=1, bias=True)
+  )
+)
+number of params:  123208705
+Using loss <__main__.Loss object at 0x7f7c1a1796a0>
+Epoch 0 training start
+Epoch: [0][50/333]	Time 0.951 (0.989)	lr 0.0010	p 8.00	eps 19.3378	kappa1.0000	Loss 0.3506 (0.5085)	Acc 0.0000 (0.0000)	
