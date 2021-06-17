@@ -5,6 +5,7 @@ CUDA_LAUNCH_BLOCKING=1 python main.py \
   --n-branches 1 --gate-type net --gate-mode gate_init \
   --net None \
   --branch-nets LipNet \
+  --load-branch-model ./trained_models/model.pth \
   --gate-feature-extraction 1 \
   --train-batch 150 --test-batch 150  \
   --train-eps 0.00784313725 --start-eps-factor 1.05 \
