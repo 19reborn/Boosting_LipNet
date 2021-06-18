@@ -10,6 +10,7 @@ import re
 import socket
 import src.CImageNetRanges
 import numpy as np
+from torchvision.datasets import CIFAR10, CIFAR100, MNIST, FashionMNIST
 # import pickle
 # from collections.abc import Iterable
 
@@ -156,8 +157,23 @@ def get_tinyimagenet():
 #     test_set.targets = milp_cert
 #     return None, test_set, 32, 3, 10
 
+def get_dataset(dataset, datadir, augmentation=True, classes=None):
+    default_transform = [
+        transforms.ToTensor(),
+        transforms.Normalize(mean[dataset], [std[dataset]] * len(mean[dataset]))
+    ]
+    train_transform = transforms.Compose((train_transforms[dataset] if augmentation else []) + default_transform)
+    test_transform = transforms.Compose(default_transform)
+    Dataset = globals()[dataset]
+    train_dataset = Dataset(root=datadir, train=True, download=True, transform=train_transform)
+    test_dataset = Dataset(root=datadir, train=False, download=True, transform=test_transform)
+    if classes is not None:
+        train_dataset = TruncateDataset(train_dataset, classes)
+        test_dataset = TruncateDataset(test_dataset, classes)
+    return train_dataset, test_dataset
 
 def get_loaders(args):
+
     if args.dataset == 'cifar10':
         train_set, test_set, input_size, input_channels, n_class = get_cifar10(args.debug)
     # elif args.dataset == 'cifar10_MILP_cert':
@@ -173,7 +189,8 @@ def get_loaders(args):
     args.input_min, args.input_max = 0, 1
 
     train_sampler = None
-
+    train_set, test_set = get_dataset(args.dataset.upper(), './data', augmentation=True, classes=None)
+    
     train_loader = torch.utils.data.DataLoader(train_set, batch_size=args.train_batch, shuffle=~args.debug,
                                                num_workers=args.num_workers,
                                                pin_memory=True, sampler=train_sampler, drop_last=True)

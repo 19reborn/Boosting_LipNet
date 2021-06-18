@@ -65,7 +65,7 @@ class MyDeepTrunkNet(torch.nn.Module):
                 print("=> loaded '{}'".format(args.load_branch_model))
 
             if gate_type == "net":
-                self.gate_nets[exit_idx] = get_net(device, dataset, gate_net_names[i], input_size, input_channel, 1,
+                self.gate_nets[exit_idx] = get_net(device, dataset, gate_net_names[i], input_size, input_channel, 2,
                                                    load_model=None if args.load_gate_model is None else args.load_gate_model[i],
                                                    net_dim=args.cert_net_dim)
                 if args.load_gate_model is not None:

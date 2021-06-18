@@ -128,7 +128,8 @@ def train_deepTrunk(dTNet, args, device, stats, train_loader, test_loader):
         ## optimizer的参数是否要加载？
         optimizer = AdamW(model, lr=args.lr, weight_decay=args.wd, betas=(args.beta1,args.beta2), eps=args.epsilon)
         schedule = create_schedule(args, len(train_loader), model, loss, optimizer)
-
+        print("Now test gate_net's certified acc.")
+        certified_acc = certified_test(model, args.eps_test, up, down, test_loader, logger, device).float().mean().item()
         if args.visualize and output_flag:
             from torch.utils.tensorboard import SummaryWriter
             writer = SummaryWriter(result_dir)
@@ -152,8 +153,8 @@ def train_deepTrunk(dTNet, args, device, stats, train_loader, test_loader):
                 if writer is not None:
                     writer.add_scalar('curve/robust train acc', robust_train_acc, epoch)
                     writer.add_scalar('curve/robust test acc', robust_test_acc, epoch)
-            if epoch % 5 == 0:
-                certified_acc = certified_test_gate(model, args.eps_test, up, down, test_loader, logger, device).float().mean().item()
+            if epoch % 5 == 4:
+                certified_acc = certified_test(model, args.eps_test, up, down, test_loader, logger, device).float().mean().item()
                 if writer is not None:
                     writer.add_scalar('curve/certified acc', certified_acc, epoch)
             if epoch > args.epochs[-1] - 3:
@@ -302,12 +303,17 @@ def train(net, loss_fun, epoch, trainloader, optimizer, schedule, logger, train_
         data_time.update(time.time() - start)
         inputs = inputs.to(device)
         targets = targets.to(device)
+        #print(targets)
+        #targets = torch.nn.functional.one_hot(targets.long(),num_classes=2).view(-1,2)
+        #print(targets)
         #perturb = attacker.find(inputs, targets)
         outputs = net(inputs)
         #print('******',outputs,worse_outputs)
         #print(targets.size())
         #print(outputs.size())
-        loss = torch.nn.functional.binary_cross_entropy_with_logits(outputs.view(-1), targets.float())
+        #loss = torch.nn.functional.binary_cross_entropy_with_logits(outputs.view(-1), targets.float())
+        #print(output.size(),targets.size())
+        loss = torch.nn.functional.cross_entropy(outputs,targets.long())
         #print(loss.size())
         with torch.no_grad():
             losses.update(loss.data.item(), targets.size(0))
@@ -356,7 +362,8 @@ def test(net, loss_fun, epoch, testloader, logger, test_logger, device, print_fr
         inputs = inputs.to(device)
         targets = targets.to(device)
         outputs = net(inputs)
-        loss = torch.nn.functional.binary_cross_entropy_with_logits(outputs.view(-1), targets)
+        #loss = torch.nn.functional.binary_cross_entropy_with_logits(outputs.view(-1), targets)
+        loss = torch.nn.functional.cross_entropy(outputs,targets.long())
         losses.update(loss.mean().item(), targets.size(0))
         accs.update(cal_acc(outputs, targets).item(), targets.size(0))
         batch_time.update(time.time() - start)
@@ -378,8 +385,10 @@ def test(net, loss_fun, epoch, testloader, logger, test_logger, device, print_fr
 
 def get_gated_data_loaders(args, device, net, train_loader, test_loader, threshold=0):
 
+    print("Get Branch_net's certified labels on Training set:")
     gate_train_loader, class_list = get_gated_data(args, device, net, train_loader, is_train=True, threshold=threshold)
 
+    print("Get Branch_net's certified labels on Test set:")
     gate_test_loader, _ = get_gated_data(args, device, net, test_loader, is_train=False, threshold=threshold)
 
     return gate_train_loader, gate_test_loader
@@ -403,10 +412,15 @@ def get_gated_data(args, device, net, data_loader,is_train=True, threshold=0):
     up = torch.FloatTensor((1 - mean) / std).view(-1, 1, 1).to(device)
     down = torch.FloatTensor((0 - mean) / std).view(-1, 1, 1).to(device)
 
-    threshold_cert = certified_test(net, args.eps_test, up, down, data_loader,None, device)
+    threshold_cert = certified_test(net, args.eps_test, up, down, data_loader, None, device)
+    #print(threshold_cert)
     #print(threshold_cert)
     #gate_target = (threshold_cert > threshold).cpu().detach()
-    gate_target = threshold_cert.cpu().detach()
+
+    print("Branch_net's certified_acc: %.4f" %(threshold_cert.float().mean().item()))
+
+    gate_target = threshold_cert.cpu()
+    #gate_target = torch.nn.functional.one_hot(threshold_cert.cpu().detach().long(),num_classes=2).view(-1,2)
     #print(gate_target)
 
     data_set = MyVisionDataset.from_idx_and_targets(data_loader.dataset, torch.ones_like(gate_target).numpy(),
@@ -420,7 +434,7 @@ def get_gated_data(args, device, net, data_loader,is_train=True, threshold=0):
                                        pin_memory=True, drop_last=False), class_list
 
 def cal_acc(outputs, targets):
-    predicted = outputs.data.view(-1) > 0.0
+    predicted = outputs.max(dim=1)[1]
     return (predicted == targets).float().mean()
 
 def certified_test(net, eps, up, down, testloader, logger, device):
@@ -439,10 +453,10 @@ def certified_test(net, eps, up, down, testloader, logger, device):
             sample_weights = torch.ones(size=targets.size(),dtype=torch.float)
         else:
             inputs, targets, sample_weights = data
+            
         inputs, targets = inputs.to(device), targets.to(device)
         lower = torch.max(inputs - eps, down)
         upper = torch.min(inputs + eps, up)
-
         outputs.append(net(inputs, lower=lower, upper=upper, targets=targets.long())[1])
         labels.append(targets)
 
@@ -451,6 +465,7 @@ def certified_test(net, eps, up, down, testloader, logger, device):
     outputs = torch.cat(outputs, dim=0)
     labels = torch.cat(labels, dim=0)
     res = (outputs.max(dim=1)[1] == labels)
+
     if logger is not None:
         logger.print(' certified acc ' + f'{res.float().mean().item():.4f}')
         
@@ -458,40 +473,6 @@ def certified_test(net, eps, up, down, testloader, logger, device):
     set_eps(net, save_eps)
     return res
 
-def certified_test_gate(net, eps, up, down, testloader, logger, device):
-    save_p = get_p_norm(net)
-    save_eps = get_eps(net)
-    set_eps(net, eps)
-    set_p_norm(net, float('inf'))
-    net.eval()
-    outputs = []
-    labels = []
-    pbar = tqdm(testloader, dynamic_ncols=True)
-
-    for batch_idx, data in enumerate(pbar):
-        if len(data)==2:
-            inputs, targets = data
-            sample_weights = torch.ones(size=targets.size(),dtype=torch.float)
-        else:
-            inputs, targets, sample_weights = data
-        inputs, targets = inputs.to(device), targets.to(device)
-        lower = torch.max(inputs - eps, down)
-        upper = torch.min(inputs + eps, up)
-
-        outputs.append(net(inputs, lower=lower, upper=upper, targets=targets.long())[1])
-        labels.append(targets)
-
-        
-        
-    outputs = torch.cat(outputs, dim=0)
-    labels = torch.cat(labels, dim=0)
-    res = ((outputs > 0.0) == labels)
-    if logger is not None:
-        logger.print(' certified acc ' + f'{res.float().mean().item():.4f}')
-        
-    set_p_norm(net, save_p)
-    set_eps(net, save_eps)
-    return res
 
 def gen_adv_examples(model, attacker, test_loader, device, logger, fast=False):
     model.eval()
@@ -513,7 +494,7 @@ def gen_adv_examples(model, attacker, test_loader, device, logger, fast=False):
             perturb = attacker.find(inputs, targets)
             with torch.no_grad():
                 outputs = model(perturb)
-                predicted = outputs.data > 0.0
+                predicted = outputs.max(dim=1)[1]
                 result &= (predicted == targets)
         correct += result.float().sum().item()
         tot_num += inputs.size(0)
