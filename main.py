@@ -146,31 +146,31 @@ def train_deepTrunk(dTNet, args, device, stats, train_loader, test_loader):
                 writer.add_scalar('curve/test acc', test_acc, epoch)
             if epoch % 50 == 49:
                 if logger is not None:
-                    logger.print('Generate adversarial examples on training dataset and test dataset (fast, inaccurate)')
-                robust_train_acc = gen_adv_examples(dTNet,attacker, train_loader, device, logger, fast=True)
-                robust_test_acc = gen_adv_examples(dTNet, attacker, test_loader, device, logger, fast=True)
+                    logger.print('Generate adversarial examples on training dataset and test dataset (fast, inaccurate) ')
+                robust_train_acc = gen_adv_examples(model,attacker, train_loader, device, logger, fast=True)
+                robust_test_acc = gen_adv_examples(model, attacker, test_loader, device, logger, fast=True)
                 if writer is not None:
                     writer.add_scalar('curve/robust train acc', robust_train_acc, epoch)
                     writer.add_scalar('curve/robust test acc', robust_test_acc, epoch)
             if epoch % 5 == 0:
-                certified_acc = certified_test(dTNet, args.eps_test, up, down, test_loader, logger, device).float().mean().item()
+                certified_acc = certified_test_gate(model, args.eps_test, up, down, test_loader, logger, device).float().mean().item()
                 if writer is not None:
                     writer.add_scalar('curve/certified acc', certified_acc, epoch)
             if epoch > args.epochs[-1] - 3:
                 if logger is not None:
                     logger.print("Generate adversarial examples on test dataset")
-                gen_adv_examples(dTNet, attacker, test_loader, device, logger)
+                gen_adv_examples(model, attacker, test_loader, device, logger)
 
         schedule(args.epochs[-1], 0)
         
         print("Calculate certified accuracy on training dataset and test dataset")
-        certified_test(dTNet, args.eps_test, up, down,  train_loader, logger, device)
-        certified_test(dTNet, args.eps_test, up, down,  test_loader, logger, device)
+        #certified_test(dTNet, args.eps_test, up, down,  train_loader, logger, device)
+        #certified_test(dTNet, args.eps_test, up, down,  test_loader, logger, device)
 
         torch.save({
             'state_dict': model.state_dict(),
             'optimizer' : optimizer.state_dict(),
-        }, os.path.join(result_dir, 'model.pth'))
+        }, os.path.join(result_dir, 'gate_model.pth'))
 
 def cert_deepTrunk_net(dTNet, args, device, data_loader, stats, log_ind=True, break_on_failure=False, epoch=None, domains=None):
     dTNet.eval()
@@ -311,7 +311,7 @@ def train(net, loss_fun, epoch, trainloader, optimizer, schedule, logger, train_
         #print(loss.size())
         with torch.no_grad():
             losses.update(loss.data.item(), targets.size(0))
-            accs.update(cal_acc(outputs.data, targets, 0).mean().item(), targets.size(0))
+            accs.update(cal_acc(outputs.data, targets).mean().item(), targets.size(0))
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -358,7 +358,7 @@ def test(net, loss_fun, epoch, testloader, logger, test_logger, device, print_fr
         outputs = net(inputs)
         loss = torch.nn.functional.binary_cross_entropy_with_logits(outputs.view(-1), targets)
         losses.update(loss.mean().item(), targets.size(0))
-        accs.update(cal_acc(outputs, targets, 0).item(), targets.size(0))
+        accs.update(cal_acc(outputs, targets).item(), targets.size(0))
         batch_time.update(time.time() - start)
         start = time.time()
         if (batch_idx + 1) % print_freq == 0 and logger is not None:
@@ -419,8 +419,8 @@ def get_gated_data(args, device, net, data_loader,is_train=True, threshold=0):
                                        shuffle=~args.debug if is_train else False, num_workers=data_loader.num_workers,
                                        pin_memory=True, drop_last=False), class_list
 
-def cal_acc(outputs, targets, threshold= 0):
-    predicted = torch.max(outputs.data, threshold)[1]
+def cal_acc(outputs, targets):
+    predicted = outputs.data.view(-1) > 0.0
     return (predicted == targets).float().mean()
 
 def certified_test(net, eps, up, down, testloader, logger, device):
@@ -458,21 +458,62 @@ def certified_test(net, eps, up, down, testloader, logger, device):
     set_eps(net, save_eps)
     return res
 
+def certified_test_gate(net, eps, up, down, testloader, logger, device):
+    save_p = get_p_norm(net)
+    save_eps = get_eps(net)
+    set_eps(net, eps)
+    set_p_norm(net, float('inf'))
+    net.eval()
+    outputs = []
+    labels = []
+    pbar = tqdm(testloader, dynamic_ncols=True)
+
+    for batch_idx, data in enumerate(pbar):
+        if len(data)==2:
+            inputs, targets = data
+            sample_weights = torch.ones(size=targets.size(),dtype=torch.float)
+        else:
+            inputs, targets, sample_weights = data
+        inputs, targets = inputs.to(device), targets.to(device)
+        lower = torch.max(inputs - eps, down)
+        upper = torch.min(inputs + eps, up)
+
+        outputs.append(net(inputs, lower=lower, upper=upper, targets=targets.long())[1])
+        labels.append(targets)
+
+        
+        
+    outputs = torch.cat(outputs, dim=0)
+    labels = torch.cat(labels, dim=0)
+    res = ((outputs > 0.0) == labels)
+    if logger is not None:
+        logger.print(' certified acc ' + f'{res.float().mean().item():.4f}')
+        
+    set_p_norm(net, save_p)
+    set_eps(net, save_eps)
+    return res
+
 def gen_adv_examples(model, attacker, test_loader, device, logger, fast=False):
     model.eval()
     correct = 0
     tot_num = 0
     size = len(test_loader)
 
-    for batch_idx, (inputs, targets) in enumerate(test_loader):
+    for batch_idx, data in enumerate(test_loader):
+        if len(data)==2:
+            inputs, targets = data
+            sample_weights = torch.ones(size=targets.size(),dtype=torch.float)
+        else:
+            inputs, targets, sample_weights = data
         inputs = inputs.to(device)
         targets = targets.to(device,dtype=torch.long)
         result = torch.ones(targets.size(0), dtype=torch.bool, device=targets.device)
+
         for i in range(1):
             perturb = attacker.find(inputs, targets)
             with torch.no_grad():
                 outputs = model(perturb)
-                predicted = torch.max(outputs.data, 1)[1]
+                predicted = outputs.data > 0.0
                 result &= (predicted == targets)
         correct += result.float().sum().item()
         tot_num += inputs.size(0)
