@@ -10,6 +10,7 @@ import json
 import os
 from itertools import combinations
 from PIL import Image
+from src.networks import FFNN, ConvMedBig,  MyResnet, myNet, EfficientNet
 from warnings import warn
 from model.model import Model, set_eps, get_eps
 from model.norm_dist import set_p_norm, get_p_norm
@@ -33,7 +34,63 @@ def parse_function_call(s):
     return name, params
 
 def get_network(device, dataset, net_name, input_size, input_channel, n_class, net_config=None, net_dim=None):
-    if net_name.startswith("LipNet"):
+    if net_name.startswith('ffnn_'):
+        tokens = net_name.split('_')
+        sizes = [int(x) for x in tokens[1:]]
+        net = FFNN(device, dataset, sizes, n_class, input_size, input_channel, net_dim=net_dim).to(device)
+    elif net_name.startswith('convmedbig_'):
+        tokens = net_name.split('_')
+        obj = ConvMedBig
+        assert tokens[0] == 'convmedbig'
+        width1 = int(tokens[2])
+        width2 = int(tokens[3])
+        width3 = int(tokens[4])
+        linear_size = int(tokens[5])
+        net = obj(device, dataset, n_class, input_size, input_channel, width1, width2, width3, linear_size=linear_size).to(device)
+    elif net_name.startswith('resnet'):
+        tokens = net_name.split('_')
+        net = MyResnet(device, dataset, [1, 2], n_class, input_size, input_channel, block=tokens[1], net_dim=net_dim).to(device)
+    elif net_name.startswith('myresnet'):
+        tokens = net_name.split('_')
+        if "p" in tokens[-1]:
+            pool = tokens[-1][1:]
+            tokens = tokens[:-1]
+            if pool == "g":
+                pooling = "global"
+            elif pool == "n":
+                pooling = None
+            else:
+                pooling = int(pool)
+        else:
+            pooling = "global"
+
+        if "w" in tokens[-1]:
+            widen = tokens[-1][1:]
+            tokens = tokens[:-1]
+            widen = int(widen)
+        else:
+            widen = 1
+
+        n_blocks = list(map(int, tokens[2:]))
+        net = MyResnet(device, dataset, n_blocks, n_class, input_size, input_channel, block=tokens[1], in_planes=16,
+                       net_dim=net_dim, pooling=pooling, widen_factor=widen).to(device)
+    elif net_name.startswith("myNetMax"):
+        if net_config is None:
+            net_config = parse_net_config(net_name, n_class, input_size, input_channel)
+            net_config["max"] = True
+            net_config["scale_width"] = False
+        net = myNet(device, dataset, net_dim=net_dim, **net_config).to(device)
+    elif net_name.startswith("myNet"):
+        if net_config is None:
+            net_config = parse_net_config(net_name, n_class, input_size, input_channel)
+        net = myNet(device, dataset, net_dim=net_dim, **net_config).to(device)
+    elif net_name.startswith("efficientnet-"):
+        tokens = net_name.split("_")
+        pretrained = "pre" in tokens
+        adv = "adv" in tokens
+        net = EfficientNet(device, dataset, tokens[0], input_size, input_channel, n_class, pretrained, adv)
+
+    elif net_name.startswith("LipNet"):
         tokens = net_name.split("_")
         if len(tokens)< 2:
             tokens.append('MLPFeature(depth=5,width=5)')
@@ -57,6 +114,46 @@ def get_network(device, dataset, net_name, input_size, input_channel, n_class, n
     #net.determine_dims(torch.randn((2, input_channel, input_size, input_size), dtype=torch.float).to(device))
     return net
 
+def parse_net_config(net_name, n_class, input_size, input_channel):
+    tokens = [x.split("_") for x in net_name.split("__")[1:]]
+    conv_widths = [0]
+    kernel_size = [0]
+    strides = [1]
+    depth_conv = [0]
+    paddings = None
+    pool = False
+    bn = re.match("myNet-BN.*",net_name) is not None
+    if len(tokens) == 1:
+        linear_sizes = tokens[0]
+    elif len(tokens) == 3:
+        conv_widths, kernel_size, linear_sizes = tokens
+    elif len(tokens) == 4:
+        conv_widths, kernel_size, depth_conv, linear_sizes = tokens
+    elif len(tokens) == 5:
+        conv_widths, kernel_size, strides, depth_conv, linear_sizes = tokens
+    elif len(tokens) == 6:
+        conv_widths, kernel_size, strides, paddings, depth_conv, linear_sizes = tokens
+    elif len(tokens) == 7:
+        conv_widths, kernel_size, strides, paddings, depth_conv, linear_sizes, pool = tokens
+        if pool == 1:
+            pool = True
+    else:
+        raise RuntimeError("Cant read net configuration")
+
+    conv_widths = [int(x) for x in conv_widths]
+    kernel_size = [int(x) for x in kernel_size]
+    strides = [int(x) for x in strides]
+    paddings = None if paddings is None else [int(x) for x in paddings]
+    if conv_widths[0] == 0:
+        conv_widths = []
+        kernel_size = []
+        strides = []
+    linear_sizes = [int(x) for x in linear_sizes]
+    depth_conv = int(depth_conv[0]) if int(depth_conv[0]) > 0 else None
+    net_config = {"n_class": n_class, "input_size": input_size, "input_channel": input_channel,
+                  "conv_widths": conv_widths, "kernel_sizes": kernel_size, "linear_sizes": linear_sizes,
+                  "depth_conv": depth_conv, "paddings": paddings, "strides": strides, "pool": pool, "bn": bn}
+    return net_config
 
 
 def get_net(device, dataset, net_name, input_size, input_channel, n_class, load_model=None, net_config=None, balance_factor=1, net_dim=None):
@@ -66,7 +163,94 @@ def get_net(device, dataset, net_name, input_size, input_channel, n_class, load_
     #    net.blocks[-1].linear.bias.data = torch.tensor(-norm.ppf(balance_factor/(balance_factor+1)),
     #                                                   dtype=net.blocks[-1].linear.bias.data.dtype).view(net.blocks[-1].linear.bias.data.shape)
 
+    return net
+
+def get_trunk_net(device, dataset, net_name, input_size, input_channel, n_class, load_model=None, net_config=None, balance_factor=1, net_dim=None):
+    net = get_network(device, dataset, net_name, input_size, input_channel, n_class, net_config=net_config, net_dim=net_dim).to(device) #, feature_extract=-1).to(device)
+
+    if n_class == 1 and isinstance(net.blocks[-1], Linear) and net.blocks[-1].bias is not None:
+        net.blocks[-1].linear.bias.data = torch.tensor(-norm.ppf(balance_factor/(balance_factor+1)),
+                                                       dtype=net.blocks[-1].linear.bias.data.dtype).view(net.blocks[-1].linear.bias.data.shape)
+
+    if load_model is not None:
+        if "crown-ibp" in load_model or "LiRPA" in load_model:
+            net = load_CROWNIBP_net_state(net, load_model)
+        else:
+            net = load_net_state(net, load_model)
+
     init_slopes(net, device, trainable=False)
+
+    return net
+
+def load_net_state(net, load_model):
+    state_dict_load = torch.load(load_model)
+    state_dict_new = net.state_dict()
+    try:
+        missing_keys, unexpected_keys = net.load_state_dict(state_dict_load, strict=False)
+        print("net loaded from %s. %d missing_keys. %d unexpected_keys" % (load_model, len(missing_keys), len(unexpected_keys)))
+    except:
+        counter = 0
+        for k_load, v_load in state_dict_load.items():
+            if k_load in state_dict_new and all(v_load.squeeze().shape == np.array(state_dict_new[k_load].squeeze().shape)):
+                #print(v_load)
+                #print(state_dict_new[k_load].shape)
+                state_dict_new.update({k_load: v_load.view(state_dict_new[k_load].shape)})
+                counter += 1
+        net.load_state_dict(state_dict_new, strict=False)
+        print("%d/%d parameters loaded from from %s" % (counter, len(state_dict_new), load_model))
+
+    return net
+
+def match_keys(new_dict, loaded_dict):
+    new_dict_keys = list(new_dict.keys())
+    new_dict_type = np.array([("bn." if ".bn" in x else "")+re.match(".*\.([a-z,_]+)$", x).group(1) for x in new_dict_keys])
+    new_dict_shape = [tuple(x.size()) if len(x.size())>0 else (1,) for x in new_dict.values()]
+    unloaded = np.ones(len(new_dict_keys), dtype=int)
+
+    loaded_dict_type = [("bn." if "bn" in x else "")+re.match(".*\.([a-z,_]+)$", x).group(1) for x in loaded_dict.keys()]
+    if all([not "bn" in x for x in loaded_dict_type]) and any([not "bn" in x for x in new_dict_type]):
+        bn_ids = [re.match("(.*)\.(running_mean)$", x).group(1) for x in loaded_dict.keys() if "running_mean" in x]
+        loaded_dict_type = ["bn."+ x if re.match("(.*)\.[a-z,_]+$", y).group(1) in bn_ids else x for x,y in zip(loaded_dict_type,loaded_dict.keys())]
+
+    for i, (k,v) in enumerate(loaded_dict.items()):
+        matched_key_ids = (unloaded
+                           *(new_dict_type == loaded_dict_type[i])
+                           *(np.array([x == (tuple(v.size()) if len(v.size())>0 else (1,)) for x in new_dict_shape]))
+                           ).nonzero()[0]
+        if len(matched_key_ids)==0:
+            warn(f"Model only partially loaded. Failed at [{i+1:d}/{len(loaded_dict_type):d}]")
+            break
+        matched_key_idx = matched_key_ids[0] if isinstance(matched_key_ids, np.ndarray) else int(matched_key_ids)
+        matched_key = new_dict_keys[matched_key_idx]
+        key_match = re.match("(.*[0-9]+\.)([a-z]*\.){0,1}([bn.]{0,1}[a-z,_]+)$", matched_key)
+        matched_keys = [x for x in new_dict_keys if x.startswith(key_match.group(1)) and x.endswith(key_match.group(3))]
+        for j, x in enumerate(new_dict_keys):
+            if x in matched_keys and j in matched_key_ids:
+                unloaded[j] = 0
+                new_dict.update({x: v})
+
+    return new_dict
+
+def load_CROWNIBP_net_state(net, load_model):
+    checkpoint = torch.load(load_model)
+    state_dict_new = net.state_dict()
+    if isinstance(checkpoint["state_dict"], list):
+        checkpoint["state_dict"] = checkpoint["state_dict"][0]
+    state_dict_load = match_keys(state_dict_new, checkpoint["state_dict"])
+
+    try:
+        missing_keys, unexpectet_keys = net.load_state_dict(state_dict_load, strict=False)
+        assert len([x for x in missing_keys if "weight" in x or "bias" in x]) == 0 and len(unexpectet_keys) == 0
+        print("net loaded from %s" % load_model)
+    except:
+        counter = 0
+        for k_load, v_load in state_dict_load.items():
+            if k_load in state_dict_new and v_load.shape == state_dict_new[k_load].shape:
+                state_dict_new.update({k_load: v_load})
+                counter += 1
+        net.load_state_dict(state_dict_new, strict=False)
+        print("%d/%d parameters loaded from from %s" % (counter, len(state_dict_load), load_model))
+
     return net
 
 
@@ -148,7 +332,6 @@ def init_slopes(net, device, trainable=False):
             param_value.data = -torch.ones(param_value.size()).to(device)
             param_value.requires_grad_(trainable)
 
-
 def count_vars(args, net):
     var_count = 0
     var_count_t = 0
@@ -158,6 +341,7 @@ def count_vars(args, net):
         if "weight" in p_name or "bias" in p_name:
             var_count += int(params.numel())
             var_count_t += int(params.numel() * params.requires_grad)
+            print(p_name,params.requires_grad)
         elif "deepz_lambda" in p_name:
             var_count_relu += int(params.numel())
 
@@ -166,6 +350,7 @@ def count_vars(args, net):
     args.var_count_relu = var_count_relu
 
     print('Number of parameters: ', var_count)
+    print('Number of parameters that have gradidents: ', var_count_t)
 
 
 def write_config(args, file_path):
@@ -322,52 +507,6 @@ def random_seed(seed_value):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-def get_result_dir(args):
-    result_dir = args.result_dir
-    mp = {
-        'dataset': '',
-        'model': '',
-        'predictor_hidden_size': 'hid',
-        'loss': None,
-        'p_start': 'p',
-        'p_end': 'p_end',
-        'batch_size': 'bs',
-        'beta': None,
-        'beta2': None,
-        'epsilon': None,
-        'start_epoch': None,
-        'checkpoint': None,
-        'gpu': None,
-        'dist_url': None,
-        'world_size': None,
-        'rank': None,
-        'print_freq': None,
-        'result_dir': None,
-        'filter_name': '',
-        'seed': '',
-        'visualize': None,
-    }
-    for arg in vars(args):
-        if arg in mp and mp[arg] is None:
-            continue
-        value = getattr(args, arg)
-        if type(value) == bool:
-            value = 'T' if value else 'F'
-        if type(value) == list:
-            value = str(value).replace(' ', '')
-        name = mp.get(arg, arg)
-        result_dir += name + str(value) + '_'
-    return result_dir
-
-def create_result_dir(args):
-    result_dir = get_result_dir(args)
-    id = 0
-    while True:
-        result_dir_id = result_dir + '_%d'%id
-        if not os.path.exists(result_dir_id): break
-        id += 1
-    os.makedirs(result_dir_id)
-    return result_dir_id
 
 class Logger(object):
     def __init__(self, dir):

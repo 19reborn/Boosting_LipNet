@@ -3,8 +3,7 @@ import torch
 class Model(nn.Module):
     def __init__(self, feature, predictor, eps):
         super(Model, self).__init__()
-        with torch.no_grad():
-            self.feature = feature
+        self.feature = feature
         self.predictor = predictor
         self.eps = eps
     def forward(self, x, lower=None, upper=None, targets=None):

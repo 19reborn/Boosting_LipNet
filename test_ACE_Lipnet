@@ -1,0 +1,14 @@
+CUDA_LAUNCH_BLOCKING=1 \
+python -u main.py \
+  --experiment-name Boosting_Lipnet \
+  --exp-id 2 \
+  --dataset cifar10 \
+  --n-branches 1 --gate-type net \
+  --mode test \
+  --trunk-nets convmedbig_flat_2_4_250 \
+  --branch-nets LipNet \
+  --gate-nets LipNet \
+  --load-trunk-model ./trained_models/cifar10_8_255_convmed_flat_2_4_250.pt \
+  --load-branch-model ./trained_models/model.pth \
+  --load-gate-model ./trained_models/gate_model.pth \
+  --eps-test 0.03137 --eps-train 0.03451 \
