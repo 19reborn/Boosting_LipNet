@@ -148,7 +148,7 @@ def train_deepTrunk(dTNet, args, device, stats, train_loader, test_loader):
         print("Now test gate_net's certified acc")
         #import pdb
         #pdb.set_trace
-        certified_acc = certified_test(model, args.eps_test, up, down, test_loader, logger, device , threshold = 0.4).float().mean().item()
+        certified_acc = certified_test(model, args.eps_test, up, down, test_loader, logger, device , threshold = 0.5).float().mean().item()
         total_acc = 0
         total_samples =0 
         save_p = get_p_norm(model)
@@ -195,19 +195,19 @@ def train_deepTrunk(dTNet, args, device, stats, train_loader, test_loader):
             if epoch % 50 == 49:
                 if logger is not None:
                     logger.print('Generate adversarial examples on training dataset and test dataset (fast, inaccurate) ')
-                robust_train_acc = gen_adv_examples(model,attacker, train_loader, device, logger, fast=True, threshold=0.4)
-                robust_test_acc = gen_adv_examples(model, attacker, test_loader, device, logger, fast=True, threshold=0.4)
+                robust_train_acc = gen_adv_examples(model,attacker, train_loader, device, logger, fast=True, threshold=0.5)
+                robust_test_acc = gen_adv_examples(model, attacker, test_loader, device, logger, fast=True, threshold=0.5)
                 if writer is not None:
                     writer.add_scalar('curve/robust train acc', robust_train_acc, epoch)
                     writer.add_scalar('curve/robust test acc', robust_test_acc, epoch)
             if epoch % 5 == 4:
-                certified_acc = certified_test(model, args.eps_test, up, down, test_loader, logger, device, threshold=0.4).float().mean().item()
+                certified_acc = certified_test(model, args.eps_test, up, down, test_loader, logger, device, threshold=0.5).float().mean().item()
                 if writer is not None:
                     writer.add_scalar('curve/certified acc', certified_acc, epoch)
             if epoch > args.epochs[-1] - 3:
                 if logger is not None:
                     logger.print("Generate adversarial examples on test dataset")
-                gen_adv_examples(model, attacker, test_loader, device, logger, threshold=0.4)
+                gen_adv_examples(model, attacker, test_loader, device, logger, threshold=0.5)
 
         schedule(args.epochs[-1], 0)
         
@@ -692,9 +692,9 @@ def ai_cert_sample(dTNet, args, inputs, target, branch_p, break_on_failure, eps,
 
 
 
-        ver_not_branch = certify(dTNet.gate_nets[exit_idx], inputs, torch.zeros_like(target.view(1,-1)).int(), eps, up, down, device , threshold = 0.4)
+        ver_not_branch = certify(dTNet.gate_nets[exit_idx], inputs, torch.zeros_like(target.view(1,-1)).int(), eps, up, down, device , threshold = 0.5)
 
-        ver_not_trunk = certify(dTNet.gate_nets[exit_idx], inputs, torch.ones_like(target.view(1,-1)).int(), eps, up, down, device , threshold = 0.4)
+        ver_not_trunk = certify(dTNet.gate_nets[exit_idx], inputs, torch.ones_like(target.view(1,-1)).int(), eps, up, down, device , threshold = 0.5)
 
 
         #print(ver_not_branch)
