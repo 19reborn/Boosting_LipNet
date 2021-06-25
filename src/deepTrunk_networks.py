@@ -72,9 +72,10 @@ class MyDeepTrunkNet(torch.nn.Module):
                 self.gate_nets[exit_idx] = get_net(device, dataset, gate_net_names[i], input_size, input_channel, 2,
                                                    load_model=None if args.load_gate_model is None else args.load_gate_model[i],
                                                    net_dim=None)
+                print(args.load_gate_model)
                 if args.load_gate_model is not None:
                     args.load_gate_model = args.load_gate_model[0]
-
+                
                     assert os.path.isfile(args.load_gate_model)
                     checkpoint = torch.load(args.load_gate_model, map_location=lambda storage, loc: storage.cuda(0))
                     state_dict = checkpoint['state_dict']
@@ -85,9 +86,10 @@ class MyDeepTrunkNet(torch.nn.Module):
                         new_state_dict = OrderedDict([('module.' + k, v) for k, v in state_dict.items()])
                         state_dict = new_state_dict
 
-                    state_dict = {k: v for k, v in state_dict.items() if v.size() == self.gate_nets[exit_idx].state_dict()[k].size() and "feature" in k}
+                    state_dict = {k: v for k, v in state_dict.items() if v.size() == self.gate_nets[exit_idx].state_dict()[k].size()}
                     #print(self.gate_nets[exit_idx].state_dict[predictor.fc1.bias])
                     #optimizer.load_state_dict(checkpoint['optimizer'])
+                    self.gate_nets[exit_idx].load_state_dict(state_dict,False)
                     print("gate_net => loaded '{}'".format(args.load_gate_model))
                     for p_name, params in self.gate_nets[exit_idx].named_parameters():
                         if "feature" in p_name:
@@ -169,7 +171,7 @@ class MyDeepTrunkNet(torch.nn.Module):
                             adv_gate = gate_net(adv_latent)
                             ce_loss_gate = self.lossFn(adv_gate, gate_target[:,j].long())
                             weight = torch.nn.functional.softplus(
-                                     2 * (adv_gate.view(-1) - gate_net.threshold_min)
+                                     2 * (adv_gate[:,1]-adv_gate[:,0] - 0)
                                      * (1 - 2 * gate_target[:, j])
                                      + 0.5).detach()
                             ce_loss -= ce_loss_gate * weight

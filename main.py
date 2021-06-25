@@ -50,6 +50,14 @@ def run(args=None):
     model_dir = args.root_dir + 'models_new/%s' % (model_signature)
     args.model_dir = model_dir
 
+    if args.eps_test is None:
+        args.eps_test = default_eps[args.dataset]
+    if args.eps_train is None:
+        args.eps_train = args.eps_test
+    mean, std = get_statistics(args.dataset.upper())
+    args.eps_train /= std
+    args.eps_test /= std
+
     if args.mode == 'train':
         print("Saving model to: %s" % model_dir)
     #count_vars(args, dTNet)
@@ -100,14 +108,8 @@ def train_deepTrunk(dTNet, args, device, stats, train_loader, test_loader):
 
     for k, exit_idx in enumerate(dTNet.exit_ids[1::]):
         model = dTNet.gate_nets[exit_idx]
-        if args.eps_test is None:
-            args.eps_test = default_eps[args.dataset]
-        if args.eps_train is None:
-            args.eps_train = args.eps_test
-        mean, std = get_statistics(args.dataset.upper())
-        args.eps_train /= std
-        args.eps_test /= std
 
+        mean, std = get_statistics(args.dataset.upper())
         print("getting dataset for gate training")
         train_loader, test_loader = get_gated_data_loaders(args, device,
                                                                         dTNet.branch_nets[exit_idx],
@@ -115,7 +117,7 @@ def train_deepTrunk(dTNet, args, device, stats, train_loader, test_loader):
         loss_name, params = parse_function_call(args.loss)
         
         loss = Loss(globals()[loss_name](**params), args.kappa)
-        result_dir = args.result_dir+'/'+'args.mode'
+        result_dir = args.result_dir+'/'+args.mode
         output_flag = True
         if output_flag:
             logger = Logger(os.path.join(result_dir, 'log.txt'))
@@ -143,16 +145,44 @@ def train_deepTrunk(dTNet, args, device, stats, train_loader, test_loader):
         #test_loss, test_acc = test(model, loss, 0, test_loader, logger, test_logger, device, args.print_freq)
         #print("Gate_net's initial acc :%.4f" %test_acc)
 
-        print("Now test gate_net's certified acc.")
-        certified_acc = certified_test(model, args.eps_test, up, down, test_loader, logger, device , threshold = 0.5).float().mean().item()
-        
+        print("Now test gate_net's certified acc")
+        #import pdb
+        #pdb.set_trace
+        certified_acc = certified_test(model, args.eps_test, up, down, test_loader, logger, device , threshold = 0.4).float().mean().item()
+        total_acc = 0
+        total_samples =0 
+        save_p = get_p_norm(model)
+        save_eps = get_eps(model)
+        set_eps(model, args.eps_test)
+        set_p_norm(model, float('inf'))
+        model.eval()
+        pbar = tqdm(test_loader, dynamic_ncols=True)
+        for it, data in enumerate(pbar):
+            if len(data)==2:
+                inputs, targets = data
+                sample_weights = torch.ones(size=targets.size(),dtype=torch.float)
+            else:
+                inputs, targets, sample_weights = data
+
+            inputs, targets = inputs.to(device), targets.to(device)
+
+            total_samples += targets.size()[0]
+            outputs = model(inputs)
+            total_acc += cal_acc(outputs.data, targets,0).float().sum().item()
+            #import pdb
+            #pdb.set_trace()
+        set_p_norm(model, save_p)
+        set_eps(model, save_eps)
+        print("gate_net's natrual acc: %.4f" %(total_acc/total_samples))
+
+
         if args.visualize and output_flag:
             from torch.utils.tensorboard import SummaryWriter
             writer = SummaryWriter(result_dir)
         else: writer = None
 
         #for epoch in range(args.start_epoch, args.epochs[-1]):
-        for epoch in range(args.start_epoch, 0):
+        for epoch in range(args.start_epoch, args.epochs[-1]):
             train_loss, train_acc = train(model, loss, epoch, train_loader, optimizer, schedule,
                                         logger, train_logger, device, args.print_freq, attacker)
             test_loss, test_acc = test(model, loss, epoch, test_loader, logger, test_logger, device, args.print_freq)
@@ -165,19 +195,19 @@ def train_deepTrunk(dTNet, args, device, stats, train_loader, test_loader):
             if epoch % 50 == 49:
                 if logger is not None:
                     logger.print('Generate adversarial examples on training dataset and test dataset (fast, inaccurate) ')
-                robust_train_acc = gen_adv_examples(model,attacker, train_loader, device, logger, fast=True, threshold=0.5)
-                robust_test_acc = gen_adv_examples(model, attacker, test_loader, device, logger, fast=True, threshold=0.5)
+                robust_train_acc = gen_adv_examples(model,attacker, train_loader, device, logger, fast=True, threshold=0.4)
+                robust_test_acc = gen_adv_examples(model, attacker, test_loader, device, logger, fast=True, threshold=0.4)
                 if writer is not None:
                     writer.add_scalar('curve/robust train acc', robust_train_acc, epoch)
                     writer.add_scalar('curve/robust test acc', robust_test_acc, epoch)
             if epoch % 5 == 4:
-                certified_acc = certified_test(model, args.eps_test, up, down, test_loader, logger, device, threshold=0.5).float().mean().item()
+                certified_acc = certified_test(model, args.eps_test, up, down, test_loader, logger, device, threshold=0.4).float().mean().item()
                 if writer is not None:
                     writer.add_scalar('curve/certified acc', certified_acc, epoch)
             if epoch > args.epochs[-1] - 3:
                 if logger is not None:
                     logger.print("Generate adversarial examples on test dataset")
-                gen_adv_examples(model, attacker, test_loader, device, logger, threshold=0.5)
+                gen_adv_examples(model, attacker, test_loader, device, logger, threshold=0.4)
 
         schedule(args.epochs[-1], 0)
         
@@ -190,15 +220,87 @@ def train_deepTrunk(dTNet, args, device, stats, train_loader, test_loader):
             'optimizer' : optimizer.state_dict(),
         }, os.path.join(result_dir, 'gate_model.pth'))
 
+@torch.no_grad()
 def cert_deepTrunk_net(dTNet, args, device, data_loader, stats, log_ind=True, break_on_failure=False, epoch=None, domains=None):
-    dTNet.eval()
+
+    tot_trunk_corr = 0
+    tot_gate_corr = 0
+    tot_branch_corr = 0
+    tot_samples = 0
+    tot_gate_0 = 0
+    tot_gate_1 = 0
+    dTNet.trunk_net.eval()
+    dTNet.gate_nets[0].eval()
+    dTNet.branch_nets[0].eval()
+    ## 分别在测试集上测试trunk_net,branch_net的Acc
+    pbar = tqdm(data_loader, dynamic_ncols=True)
+    for it, data in enumerate(pbar):
+        if len(data)==2:
+            inputs, targets = data
+            sample_weights = torch.ones(size=targets.size(),dtype=torch.float)
+        else:
+            inputs, targets, sample_weights = data
+
+        inputs, targets = inputs.to(device), targets.to(device)
+
+        tot_samples += targets.size()[0]
+        trunk_out = dTNet.trunk_net(inputs)
+        tot_trunk_corr += cal_acc(trunk_out.data, targets, 0).float().sum().item()
+         
+        branch_out = dTNet.branch_nets[0](inputs)
+        tot_branch_corr += cal_acc(branch_out.data, targets, 0).float().sum().item()
+
+        gate_0_out =dTNet.gate_nets[0](inputs)
+        tot_gate_0 += cal_acc(gate_0_out.data, torch.zeros([targets.size()[0],1]).to(device),0.5).float().sum().item()
+        tot_gate_1 += cal_acc(gate_0_out.data, torch.ones([targets.size()[0],1]).to(device),0.5).float().sum().item()
+        #import pdb
+        #pdb.set_trace()
+    print("trunk_net nat_acc: %.4f, branch_net nat_acc: %.4f" %(tot_trunk_corr/tot_samples, tot_branch_corr/tot_samples))
+    print("gate_net 0_acc: %.4f, gate_net 1_acc: %.4f" %(tot_gate_0/tot_samples, tot_gate_1/tot_samples))
+    train_set_spec = MyVisionDataset.from_idx(data_loader.dataset, np.ones_like(data_loader.dataset.targets).astype(bool), train=True)
+    train_set_spec.set_weights(None)
+    train_loader_spec = torch.utils.data.DataLoader(train_set_spec, batch_size=args.train_batch,
+                                                    shuffle=True, num_workers=data_loader.num_workers, pin_memory=True, drop_last=True)
+    test_set_spec = MyVisionDataset.from_idx(data_loader.dataset,
+                                             np.ones_like(data_loader.dataset.targets).astype(bool), train=False)
+    test_set_spec.set_weights(None)
+    test_loader_spec = torch.utils.data.DataLoader(test_set_spec, batch_size=args.test_batch,
+                                                   shuffle=False, num_workers=data_loader.num_workers, pin_memory=True, drop_last=False)
+
+    train_loader, test_loader = get_gated_data_loaders(args, device,
+                                                                    dTNet.branch_nets[0],
+                                                                    train_loader_spec, test_loader_spec)
+
+    gate_predict =[]
+    gate_labels =[]
+    tot_samples = 0
+    pbar = tqdm(test_loader, dynamic_ncols=True)
+    for it, data in enumerate(pbar):
+        if len(data)==2:
+            inputs, targets = data
+            sample_weights = torch.ones(size=targets.size(),dtype=torch.float)
+        else:
+            inputs, targets, sample_weights = data
+
+        inputs, targets = inputs.to(device), targets.to(device)
+
+        tot_samples += targets.size()[0]
+        gate_out = dTNet.gate_nets[0](inputs)
+
+        tot_gate_corr += cal_acc(gate_out.data, targets,0.5).float().sum().item()
+        
+        gate_predict.append(gate_out.max(dim=1)[1])
+        gate_labels.append(targets)
+        
+    print("gate_net's natural acc:%.4f" %(tot_gate_corr/tot_samples))
+    
+    
     n_exits = dTNet.n_branches
     tot_corr = 0
     tot_ver_corr = 0
     tot_adv_corr = 0
     tot_samples = 0
-    img_id = 0
-
+    img_id = 0    
     adv_attack_test = AdvAttack(eps=args.eps_test, n_steps=20,
                                 step_size=args.eps_test / 4, adv_type="pgd")
 
@@ -209,7 +311,7 @@ def cert_deepTrunk_net(dTNet, args, device, data_loader, stats, log_ind=True, br
         csv_log = open(os.path.join(args.model_dir, "cert_log.csv"), mode='w')
         log_writer = csv.writer(csv_log, delimiter=';', quotechar='"', quoting=csv.QUOTE_MINIMAL)
                         
-        
+    
     
     pbar = tqdm(data_loader, dynamic_ncols=True)
 
@@ -260,9 +362,8 @@ def cert_deepTrunk_net(dTNet, args, device, data_loader, stats, log_ind=True, br
         tot_corr += nat_ok.int().sum().item()
         #tot_adv_corr += adv_ok.int().sum().item()
 
-        #tot_adv_corr += adv_ok.int().sum().item()
 
-    print('nat_corr:%.4f, adv_corr:%.4f, %ver_corr:%.4f' %(tot_corr/tot_samples, tot_adv_corr/tot_samples, tot_ver_corr/tot_samples))
+    print('nat_corr:%.4f, adv_corr:%.4f, ver_corr:%.4f' %(tot_corr/tot_samples, tot_adv_corr/tot_samples, tot_ver_corr/tot_samples))
 
     
 def parse_function_call(s):
@@ -355,12 +456,14 @@ def train(net, loss_fun, epoch, trainloader, optimizer, schedule, logger, train_
         #outputs, worse_outputs = net(perturb, targets=targets.long())
         outputs, worse_outputs = net(inputs, targets=targets.long())
         loss = loss_fun(outputs, worse_outputs, targets.long())
+        import pdb
+        pdb.set_trace()
         #loss = torch.nn.functional.cross_entropy(outputs,targets.long())
         #loss = loss_fun(outputs,targets.long())
         #print(loss.size())
         with torch.no_grad():
             losses.update(loss.data.item(), targets.size(0))
-            accs.update(cal_acc(outputs.data, targets).mean().item(), targets.size(0))
+            accs.update(cal_acc(outputs.data, targets, threshold = 0.5 ).float().mean().item(), targets.size(0))
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -408,7 +511,7 @@ def test(net, loss_fun, epoch, testloader, logger, test_logger, device, print_fr
         #loss = torch.nn.functional.cross_entropy(outputs,targets.long())
         loss = loss_fun(outputs,targets.long())
         losses.update(loss.mean().item(), targets.size(0))
-        accs.update(cal_acc(outputs, targets).item(), targets.size(0))
+        accs.update(cal_acc(outputs, targets, threshold =0.5).float().mean().item(), targets.size(0))
         batch_time.update(time.time() - start)
         start = time.time()
         if (batch_idx + 1) % print_freq == 0 and logger is not None:
@@ -471,15 +574,20 @@ def get_gated_data(args, device, net, data_loader,is_train=True, threshold=0):
         return None, class_list
     else:
         return torch.utils.data.DataLoader(data_set, batch_size=args.train_batch if is_train else args.test_batch,
-                                       shuffle=False if is_train else False, num_workers=data_loader.num_workers,
+                                       shuffle=True if is_train else False, num_workers=data_loader.num_workers,
                                        pin_memory=True, drop_last=False), class_list
 
 def cal_acc(outputs, targets, threshold = 0.5):
-    predicted = F.softmax(outputs,1)
-    #print(predicted.size())
-    predicted = outputs[:,1]> threshold
-    #predicted = outputs.max(dim=1)[1]
-    return (predicted == targets).float().mean()
+    if threshold == 0:
+        return (outputs.max(dim=1)[1] == targets)
+    else:
+        predicted = F.softmax(outputs,1)
+        #print(predicted.size())
+        #print(predicted[0])
+        predicted = outputs[:,1]> threshold
+        #predicted = outputs.max(dim=1)[1]
+        #print(predicted == targets)
+        return (predicted == targets)
 
 def certify(net, inputs, targets ,eps, up, down, device, threshold=0):
     save_p = get_p_norm(net)
@@ -536,7 +644,11 @@ def certified_test(net, eps, up, down, testloader, logger, device, threshold=0):
         inputs, targets = inputs.to(device), targets.to(device)
         lower = torch.max(inputs - eps, down)
         upper = torch.min(inputs + eps, up)
-        print(targets)
+
+        #output = net(inputs, targets=targets.long())
+        #import pdb
+        #pdb.set_trace()
+
         outputs.append(net(inputs, lower=lower, upper=upper, targets=targets.long())[1])
         labels.append(targets)
 
@@ -561,7 +673,7 @@ def certified_test(net, eps, up, down, testloader, logger, device, threshold=0):
     return res
 
 
-def ai_cert_sample(dTNet, args, inputs, target, branch_p, break_on_failure, eps, device):
+def ai_cert_sample(dTNet, args, inputs, target, branch_p, break_on_failure, eps, device, cert_trunk=False):
     dTNet.eval()
     ver_corr = torch.ones_like(target).byte()
     ver_not_trunk = False
@@ -580,13 +692,13 @@ def ai_cert_sample(dTNet, args, inputs, target, branch_p, break_on_failure, eps,
 
 
 
-        ver_not_branch = certify(dTNet.gate_nets[exit_idx], inputs, torch.zeros_like(target.view(1,-1)).int(), eps, up, down, device , threshold = 0.5)
+        ver_not_branch = certify(dTNet.gate_nets[exit_idx], inputs, torch.zeros_like(target.view(1,-1)).int(), eps, up, down, device , threshold = 0.4)
 
-        ver_not_trunk = certify(dTNet.gate_nets[exit_idx], inputs, torch.ones_like(target.view(1,-1)).int(), eps, up, down,device , threshold = 0.5)
+        ver_not_trunk = certify(dTNet.gate_nets[exit_idx], inputs, torch.ones_like(target.view(1,-1)).int(), eps, up, down, device , threshold = 0.4)
 
 
-        print(ver_not_branch)
-        print(ver_not_trunk)
+        #print(ver_not_branch)
+        #print(ver_not_trunk)
         if ver_not_branch:
             # Sample can not reach branch
             branch_p[k + 1] = 0
@@ -633,20 +745,21 @@ def ai_cert_sample(dTNet, args, inputs, target, branch_p, break_on_failure, eps,
             break
 
     if not ver_not_trunk and not branch_p[0] == 0:
-        if ver_corr or not break_on_failure:
-            #try:
-            ver_corr_trunk, threshold_n, _ = dTNet.trunk_cnet.get_abs_loss(inputs, target, eps, 'box', dTNet.trunk_cnet.threshold_min,beta=1)
-            if ver_corr_trunk:
-                branch_p[0] = 2
-            # elif ver_trunk:
-            #     branch_p[0] = -1
-            ver_corr = ver_corr_trunk & ver_corr
-            #except:
-            #    warn("Certification of trunk failed critically.")
-            #    ver_corr[:] = False
+        if cert_trunk:
+            if ver_corr or not break_on_failure:
+                #try:
+                ver_corr_trunk, threshold_n, _ = dTNet.trunk_cnet.get_abs_loss(inputs, target, eps, 'box', dTNet.trunk_cnet.threshold_min,beta=1)
+                if ver_corr_trunk:
+                    branch_p[0] = 2
+                # elif ver_trunk:
+                #     branch_p[0] = -1
+                ver_corr = ver_corr_trunk & ver_corr
+                #except:
+                #    warn("Certification of trunk failed critically.")
+                #    ver_corr[:] = False
 
 
-    print(ver_corr)
+    #print(ver_corr)
     return branch_p, ver_corr, gate_threshold_s
 
 

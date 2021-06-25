@@ -163,6 +163,7 @@ def get_net(device, dataset, net_name, input_size, input_channel, n_class, load_
     #    net.blocks[-1].linear.bias.data = torch.tensor(-norm.ppf(balance_factor/(balance_factor+1)),
     #                                                   dtype=net.blocks[-1].linear.bias.data.dtype).view(net.blocks[-1].linear.bias.data.shape)
 
+    init_slopes(net, device, trainable=False)
     return net
 
 def get_trunk_net(device, dataset, net_name, input_size, input_channel, n_class, load_model=None, net_config=None, balance_factor=1, net_dim=None):
@@ -339,6 +340,7 @@ def count_vars(args, net):
 
     for p_name, params in net.named_parameters():
         if "weight" in p_name or "bias" in p_name:
+            print(params)
             var_count += int(params.numel())
             var_count_t += int(params.numel() * params.requires_grad)
             print(p_name,params.requires_grad)
