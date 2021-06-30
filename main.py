@@ -221,7 +221,20 @@ def cert_deepTrunk_net(dTNet, args, device, data_loader, stats, log_ind=True, br
     tot_gate_corr = 0
     tot_branch_corr = 0
     tot_samples = 0
-
+    ## Use models like Resnet, need to un_normalize.
+    mean = [0.4914, 0.4822, 0.4465]
+    std = 0.2009
+    def normalize(t):
+        t[:, 0, :, :] = (t[:, 0, :, :] - mean[0])/std[0]
+        t[:, 1, :, :] = (t[:, 1, :, :] - mean[1])/std[1]
+        t[:, 2, :, :] = (t[:, 2, :, :] - mean[2])/std[2]
+        return t
+    def un_normalize(t):
+        t[:, 0, :, :] = (t[:, 0, :, :] * std) + mean[0]
+        t[:, 1, :, :] = (t[:, 1, :, :] * std) + mean[1]
+        t[:, 2, :, :] = (t[:, 2, :, :] * std) + mean[2]
+        return t
+    
     dTNet.trunk_net.eval()
     dTNet.gate_nets[0].eval()
     dTNet.branch_nets[0].eval()
@@ -242,7 +255,7 @@ def cert_deepTrunk_net(dTNet, args, device, data_loader, stats, log_ind=True, br
 
         tot_samples += targets.size()[0]
         with torch.no_grad():
-            trunk_out = dTNet.trunk_net(inputs)
+            trunk_out = dTNet.trunk_net(inputs.clone())
         tot_trunk_corr += cal_acc(trunk_out.data, targets, threshold = args.threshold, n_class =10 ).float().sum().item()
         with torch.no_grad():
             branch_out = dTNet.branch_nets[0](inputs)
@@ -254,7 +267,6 @@ def cert_deepTrunk_net(dTNet, args, device, data_loader, stats, log_ind=True, br
     mean, std = get_statistics(args.dataset.upper())
     up = torch.FloatTensor((1 - mean) / std).view(-1, 1, 1).to(device)
     down = torch.FloatTensor((0 - mean) / std).view(-1, 1, 1).to(device)
-
 
     
     tot_corr = 0
@@ -268,11 +280,18 @@ def cert_deepTrunk_net(dTNet, args, device, data_loader, stats, log_ind=True, br
                                     drop_last=False)
         csv_log = open(os.path.join(args.model_dir, "cert_log.csv"), mode='w')
         log_writer = csv.writer(csv_log, delimiter=';', quotechar='"', quoting=csv.QUOTE_MINIMAL)
+        
+
+    
                         
     attacker_gate = AttackPGD(dTNet.gate_nets[0], args.eps_test, step_size=args.eps_test / 4, num_steps=20, up=up, down=down)
     attacker_branch = AttackPGD(dTNet.branch_nets[0], args.eps_test, step_size=args.eps_test / 4, num_steps=20, up=up, down=down)
-    attacker_trunk = AttackPGD(dTNet.trunk_net, args.eps_test, step_size=args.eps_test / 4, num_steps=20, up=up, down=down)    
+    attacker_trunk = AttackPGD(dTNet.trunk_net, args.eps_test, step_size=args.eps_test*std / 4, num_steps=20, up=up, down=down)    
+    #with torch.enable_grad():        
+    #    trunk_adv_acc = gen_adv_examples(dTNet.trunk_net, attacker_trunk, data_loader, device, None, fast=False, threshold=args.threshold, n_class =10)
 
+
+   # print("trunk_adv_acc :%.4f " %trunk_adv_acc)
     pbar = tqdm(data_loader, dynamic_ncols=True)
     for it, data in enumerate(pbar):
         if len(data)==2:
@@ -290,50 +309,62 @@ def cert_deepTrunk_net(dTNet, args, device, data_loader, stats, log_ind=True, br
             perturb_gate_0 = attacker_gate.find(inputs.clone(), torch.zeros_like(targets).int())              
             perturb_trunk = attacker_trunk.find(inputs.clone(), targets.clone())              
             perturb_branch = attacker_branch.find(inputs.clone(), targets.clone())
-    
+            
+        all_perturb_gate_1 = dTNet.gate_nets[0](perturb_gate_1)
+        all_perturb_gate_0 = dTNet.gate_nets[0](perturb_gate_0)
+        all_perturb_trunk = dTNet.trunk_net(perturb_trunk)
+        all_perturb_branch = dTNet.branch_nets[0](perturb_branch)
+        all_choose = certify(dTNet.gate_nets[0], inputs, torch.ones_like(targets.view(1,-1)),args.eps_test, up, down, device , threshold=args.threshold, n_class =2)
+        all_certified = certify(dTNet.branch_nets[0], inputs, targets, args.eps_test, up, down, device , threshold = 0.0, n_class=10)
+
+        all_trunk_outputs = dTNet.trunk_net(inputs.clone())
+        all_gate_outputs = dTNet.gate_nets[0](inputs)
+        all_branch_outputs = dTNet.branch_nets[0](inputs)
         for n in range(inputs.shape[0]):
             target = targets[n:n + 1]
             input_img = inputs[n:n + 1]
             
             with torch.no_grad():
-                outputs = dTNet.branch_nets[0](perturb_branch[n:n+1])
-                predicted = torch.max(outputs.data, 1)[1]
+                outputs = all_perturb_branch[n]
+                predicted = outputs.max(dim=0)[1]
                 adv_branch = (predicted == target).squeeze()  
 
-                outputs = dTNet.trunk_net(perturb_trunk[n:n+1])
-                predicted = torch.max(outputs.data, 1)[1]
+                outputs = all_perturb_trunk[n]
+                predicted = outputs.max(dim=0)[1]
                 adv_trunk = (predicted == target).squeeze()                    
 
-                choose = certify(dTNet.gate_nets[0], input_img, torch.ones_like(target.view(1,-1)).int(), args.eps_test, up, down, device , threshold=args.threshold, n_class =2).float().mean()
-                gate_out = dTNet.gate_nets[0](input_img)
-                choose = ((gate_out[0][1] - gate_out[0][0]).cpu() > args.threshold) & choose.cpu().bool() 
+                #choose = certify(dTNet.gate_nets[0], input_img, torch.ones_like(target.view(1,-1)).int(), args.eps_test, up, down, device , threshold=args.threshold, n_class =2).float().mean()
+                gate_out = all_gate_outputs[n]
+                choose = ((gate_out[1] - gate_out[0]).cpu() > args.threshold) & all_choose[n].cpu().bool() 
 
                 if choose == 1:
-                    certified_acc = certify(dTNet.branch_nets[0], input_img, target, args.eps_test, up, down, device , threshold = 0.0, n_class=10).float().mean()
+                    #certified_acc = certify(dTNet.branch_nets[0], input_img, target, args.eps_test, up, down, device , threshold = 0.0, n_class=10).float().mean()
+                    certified_acc = all_certified[n]
                     if certified_acc == 1:
                         tot_ver_corr +=1 
-                    outputs = dTNet.branch_nets[0](input_img)
-                    tot_corr += (outputs.max(dim=1)[1] == target).float().mean()
+                    outputs = all_branch_outputs[n]
+ 
+                    tot_corr += (outputs.max(dim=0)[1] == target).float().mean()
                     
-                    outputs = dTNet.gate_nets[0](perturb_gate_1[n:n+1])
-                    predicted = torch.max(outputs.data, 1)[1]
+                    outputs = all_perturb_gate_1[n]
+                    predicted = outputs.max(dim=0)[1]
                     adv_gate = (predicted == 1).squeeze()
                     if adv_gate == 0:
                         tot_adv_corr += adv_trunk & adv_branch
                     else:
                         tot_adv_corr += adv_branch
                 else:
-                    outputs = dTNet.trunk_net(input_img)
-                    tot_corr += (outputs.max(dim=1)[1] == target).float().mean()   
-                    outputs = dTNet.gate_nets[0](perturb_gate_0[n:n+1])
-                    predicted = torch.max(outputs.data, 1)[1]
+                    outputs = all_trunk_outputs[n]
+                    tot_corr += (outputs.max(dim=0)[1] == target).float().mean()   
+                    
+                    outputs = all_perturb_gate_0[n]
+                    predicted = outputs.max(dim=0)[1]
                     adv_gate = (predicted == 0).squeeze()
                     if adv_gate == 0:
                         tot_adv_corr += adv_trunk & adv_branch
                     else:
                         tot_adv_corr += adv_trunk     
-            
-    print('nat_corr:%.4f, adv_corr:%.4f, ver_corr:%.4f' %(tot_corr/tot_samples, tot_adv_corr.float()/tot_samples, tot_ver_corr/tot_samples))
+    print('nat_corr:%.4f, adv_corr:%.4f, ver_corr:%.4f' %(tot_corr/tot_samples, tot_adv_corr/tot_samples, tot_ver_corr/tot_samples))
 
 
 def parse_function_call(s):
@@ -660,7 +691,21 @@ def gen_adv_examples(model, attacker, test_loader, device, logger, fast=False , 
     correct = 0
     tot_num = 0
     size = len(test_loader)
-
+    
+    mean = [0.4914, 0.4822, 0.4465]
+    std = 0.2009
+    ## Use models like Resnet, need to un_normalize.
+    def normalize(t):
+        t[:, 0, :, :] = (t[:, 0, :, :] - mean[0])/std[0]
+        t[:, 1, :, :] = (t[:, 1, :, :] - mean[1])/std[1]
+        t[:, 2, :, :] = (t[:, 2, :, :] - mean[2])/std[2]
+        return t
+    def un_normalize(t):
+        t[:, 0, :, :] = (t[:, 0, :, :] * std) + mean[0]
+        t[:, 1, :, :] = (t[:, 1, :, :] * std) + mean[1]
+        t[:, 2, :, :] = (t[:, 2, :, :] * std) + mean[2]
+        return t
+    
     for batch_idx, data in enumerate(test_loader):
         if len(data)==2:
             inputs, targets = data
@@ -670,12 +715,16 @@ def gen_adv_examples(model, attacker, test_loader, device, logger, fast=False , 
         inputs = inputs.to(device)
         targets = targets.to(device,dtype=torch.long)
         result = torch.ones(targets.size(0), dtype=torch.bool, device=targets.device)
-
+        #inputs = un_normalize(inputs)
+        
         for i in range(1):
             perturb = attacker.find(inputs, targets)
             with torch.no_grad():
                 outputs = model(perturb)
-                predicted = (outputs[:,1] - outputs[:,0]) > threshold 
+                if n_class ==2:
+                    predicted = (outputs[:,1] - outputs[:,0]) > threshold 
+                else:
+                    predicted = torch.max(outputs.data, 1)[1]
                 result &= (predicted == targets)
         correct += result.float().sum().item()
         tot_num += inputs.size(0)
