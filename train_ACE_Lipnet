@@ -1,17 +1,17 @@
 CUDA_LAUNCH_BLOCKING=1 \
 python -u main.py \
   --experiment-name Boosting_Lipnet \
-  --exp-id 3 \
+  --exp-id 1 \
   --dataset cifar10 \
-  --n-branches 1 --gate-type net \
-  --mode train \
-  --gate-nets LipNet \
+  --n-branches 1 --gate-type net  \
   --branch-nets LipNet \
-  --load-gate-model ./trained_models/model.pth \
-  --load-branch-model ./trained_models/model.pth \
-  --train-batch 100 --test-batch 100  \
-  --p-start 2 --p-end 400 --epochs 0,20,30,40,100 --kappa 0.95 \
-  --lr 0.05 --wd 5e-3\
+  --gate-nets LipNet \
+  --load-gate-model ./model.pth \
+  --load-branch-model ./model.pth \
+  --train-batch 500 --test-batch 500  \
+  --p-start 2 --p-end 200 --epochs 0,15,100,750,40 --kappa 0.95 \
+  --lr 0.001 \
   --eps-test 0.03137 --eps-train 0.03451 \
   --retrain-branch False \
-  --test-freq 40 \
+  --test-freq 20 \
+  --threshold 0.000 \

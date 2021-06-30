@@ -14,6 +14,7 @@ from src.networks import FFNN, ConvMedBig,  MyResnet, myNet, EfficientNet
 from warnings import warn
 from model.model import Model, set_eps, get_eps
 from model.norm_dist import set_p_norm, get_p_norm
+from src.resnet import * 
 
 
 def parse_function_call(s):
@@ -48,8 +49,8 @@ def get_network(device, dataset, net_name, input_size, input_channel, n_class, n
         linear_size = int(tokens[5])
         net = obj(device, dataset, n_class, input_size, input_channel, width1, width2, width3, linear_size=linear_size).to(device)
     elif net_name.startswith('resnet'):
-        tokens = net_name.split('_')
-        net = MyResnet(device, dataset, [1, 2], n_class, input_size, input_channel, block=tokens[1], net_dim=net_dim).to(device)
+        net = resnet(num_classes=n_class,depth=110)
+        net = nn.DataParallel(net).cuda()
     elif net_name.startswith('myresnet'):
         tokens = net_name.split('_')
         if "p" in tokens[-1]:
@@ -163,23 +164,11 @@ def get_net(device, dataset, net_name, input_size, input_channel, n_class, load_
     #    net.blocks[-1].linear.bias.data = torch.tensor(-norm.ppf(balance_factor/(balance_factor+1)),
     #                                                   dtype=net.blocks[-1].linear.bias.data.dtype).view(net.blocks[-1].linear.bias.data.shape)
 
-    init_slopes(net, device, trainable=False)
     return net
 
 def get_trunk_net(device, dataset, net_name, input_size, input_channel, n_class, load_model=None, net_config=None, balance_factor=1, net_dim=None):
     net = get_network(device, dataset, net_name, input_size, input_channel, n_class, net_config=net_config, net_dim=net_dim).to(device) #, feature_extract=-1).to(device)
 
-    if n_class == 1 and isinstance(net.blocks[-1], Linear) and net.blocks[-1].bias is not None:
-        net.blocks[-1].linear.bias.data = torch.tensor(-norm.ppf(balance_factor/(balance_factor+1)),
-                                                       dtype=net.blocks[-1].linear.bias.data.dtype).view(net.blocks[-1].linear.bias.data.shape)
-
-    if load_model is not None:
-        if "crown-ibp" in load_model or "LiRPA" in load_model:
-            net = load_CROWNIBP_net_state(net, load_model)
-        else:
-            net = load_net_state(net, load_model)
-
-    init_slopes(net, device, trainable=False)
 
     return net
 
@@ -333,23 +322,23 @@ def init_slopes(net, device, trainable=False):
             param_value.data = -torch.ones(param_value.size()).to(device)
             param_value.requires_grad_(trainable)
 
-def count_vars(args, net):
+def count_vars(net):
     var_count = 0
     var_count_t = 0
     var_count_relu = 0
 
     for p_name, params in net.named_parameters():
         if "weight" in p_name or "bias" in p_name:
-            print(params)
+            #print(params)
             var_count += int(params.numel())
             var_count_t += int(params.numel() * params.requires_grad)
             print(p_name,params.requires_grad)
         elif "deepz_lambda" in p_name:
             var_count_relu += int(params.numel())
-
-    args.var_count = var_count
-    args.var_count_t = var_count_t
-    args.var_count_relu = var_count_relu
+        print(p_name,params.requires_grad)
+    #args.var_count = var_count
+    #args.var_count_t = var_count_t
+    #args.var_count_relu = var_count_relu
 
     print('Number of parameters: ', var_count)
     print('Number of parameters that have gradidents: ', var_count_t)

@@ -5,10 +5,10 @@ python -u main.py \
   --dataset cifar10 \
   --n-branches 1 --gate-type net \
   --mode test \
-  --trunk-nets efficientnet-b0_pre \
+  --trunk-nets resnet \
   --branch-nets LipNet \
   --gate-nets LipNet \
-  --load-trunk-model ./trained_models/EB-0_cifar10_adv_8_255.pt \
-  --load-branch-model ./trained_models/model.pth \
-  --load-gate-model ./trained_models/gate_model.pth \
+  --load-trunk-model robust_model.pth.tar \
+  --load-branch-model ./model.pth \
+  --load-gate-model ./result/train/gate_model_28-72.pth \
   --eps-test 0.03137 --eps-train 0.03451 \

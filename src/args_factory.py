@@ -35,7 +35,7 @@ def get_args():
     parser.add_argument('--beta2', default=0.99, type=float)
     parser.add_argument('--epsilon', default=1e-10, type=float)
     parser.add_argument('--wd', default=0.0, type=float)
-
+    parser.add_argument('--threshold', default=0.0, type=float)
 
     parser.add_argument('--visualize', action='store_true')
 

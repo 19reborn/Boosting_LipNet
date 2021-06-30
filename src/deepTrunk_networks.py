@@ -92,8 +92,9 @@ class MyDeepTrunkNet(torch.nn.Module):
                     self.gate_nets[exit_idx].load_state_dict(state_dict,False)
                     print("gate_net => loaded '{}'".format(args.load_gate_model))
                     for p_name, params in self.gate_nets[exit_idx].named_parameters():
-                        if "feature" in p_name:
-                            params.requires_grad = False
+                        #params.requires_grad = False
+                        if "predictor" in p_name:
+                            params.requires_grad = True
 
             else:
                 self.gate_nets[exit_idx] = SeqNet(Sequential(*[*self.branch_nets[exit_idx].blocks, Entropy(n_class, low_mem=True, neg=True)]))
@@ -104,10 +105,15 @@ class MyDeepTrunkNet(torch.nn.Module):
 
         ## load_trunk_model
             if args.load_trunk_model is not None:
-                load_net_state(self.trunk_net, args.load_trunk_model)
+                #checkpoint = torch.load(args.load_trunk_model)
+                #self.trunk_net.load_state_dict(checkpoint['state_dict'])
+                robust_model= 'robust_model.pth.tar'
+                checkpoint = torch.load(robust_model)
+                self.trunk_net.load_state_dict(checkpoint['state_dict'])
+                #load_net_state(self.trunk_net, args.load_trunk_model)
                 print("trunk_net => loaded '{}'".format(args.load_trunk_model))
 
-            self.trunk_cnet = CombinedNetwork.get_cnet(self.trunk_net, device, lossFn, evalFn, n_rand_proj=50, no_r_net=True, input_channels=self.input_channel)
+            #self.trunk_cnet = CombinedNetwork.get_cnet(self.trunk_net, device, lossFn, evalFn, n_rand_proj=50, no_r_net=True, input_channels=self.input_channel)
 
     @staticmethod
     def get_deepTrunk_net(args, device, lossFn, evalFn, input_size, input_channel, n_class):

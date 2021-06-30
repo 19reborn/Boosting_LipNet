@@ -61,8 +61,8 @@ def run(args=None):
     if args.mode == 'train':
         print("Saving model to: %s" % model_dir)
     #count_vars(args, dTNet)
-    count_vars(args, dTNet.branch_nets[0])
-    count_vars(args, dTNet.gate_nets[0])
+    #count_vars(args, dTNet.branch_nets[0])
+    count_vars(dTNet.gate_nets[0])
     if not os.path.exists(model_dir):
         os.makedirs(model_dir)
 
@@ -86,12 +86,8 @@ def run(args=None):
             set_p_norm(dTNet.branch_nets[exit_idx], p_norm)
             set_p_norm(dTNet.gate_nets[exit_idx], p_norm)
 
-        with torch.no_grad():
-            cert_deepTrunk_net(dTNet, args, device, test_loader, stats, log_ind=True)
-    #if args.cert:
-    #    with torch.no_grad():
-    #        cert_deepTrunk_net(dTNet, args, device, test_loader if args.test_set == "test" else train_loader,
-    #                           stats, log_ind=True, break_on_failure=False, epoch=epoch)
+        cert_deepTrunk_net(dTNet, args, device, test_loader, stats, log_ind=True)
+
 
 def train_deepTrunk(dTNet, args, device, stats, train_loader, test_loader):
 
@@ -116,8 +112,9 @@ def train_deepTrunk(dTNet, args, device, stats, train_loader, test_loader):
                                                                         train_loader_spec, test_loader_spec)
         loss_name, params = parse_function_call(args.loss)
         
+
         loss = Loss(globals()[loss_name](**params), args.kappa)
-        result_dir = args.result_dir+'/'+args.mode
+        result_dir = args.result_dir
         output_flag = True
         if output_flag:
             logger = Logger(os.path.join(result_dir, 'log.txt'))
@@ -138,19 +135,18 @@ def train_deepTrunk(dTNet, args, device, stats, train_loader, test_loader):
         attacker = AttackPGD(model, args.eps_test, step_size=args.eps_test / 4, num_steps=20, up=up, down=down)
         args.epochs = [int(epoch) for epoch in args.epochs.split(',')]
 
-        ## optimizer的参数是否要加载？
+
         optimizer = AdamW(model, lr=args.lr, weight_decay=args.wd, betas=(args.beta1,args.beta2), eps=args.epsilon)
         schedule = create_schedule(args, len(train_loader), model, loss, optimizer)
 
-        #test_loss, test_acc = test(model, loss, 0, test_loader, logger, test_logger, device, args.print_freq)
-        #print("Gate_net's initial acc :%.4f" %test_acc)
 
         print("Now test gate_net's certified acc")
-        #import pdb
-        #pdb.set_trace
-        certified_acc = certified_test(model, args.eps_test, up, down, test_loader, logger, device , threshold = 0.5).float().mean().item()
+
+        certified_acc = certified_test(model, args.eps_test, up, down, test_loader, logger, device , threshold = args.threshold, n_class = 2).float().mean().item()
         total_acc = 0
         total_samples =0 
+        tot_1 = 0
+        tot_0 = 0
         save_p = get_p_norm(model)
         save_eps = get_eps(model)
         set_eps(model, args.eps_test)
@@ -169,25 +165,26 @@ def train_deepTrunk(dTNet, args, device, stats, train_loader, test_loader):
             total_samples += targets.size()[0]
             outputs = model(inputs)
             total_acc += cal_acc(outputs.data, targets,0).float().sum().item()
-            #import pdb
-            #pdb.set_trace()
+            tot_1 += (outputs.max(dim=1)[1] == 1).float().sum().item()
+            tot_0 += (outputs.max(dim=1)[1] == 0).float().sum().item()
         set_p_norm(model, save_p)
         set_eps(model, save_eps)
         print("gate_net's natrual acc: %.4f" %(total_acc/total_samples))
-
+        print("output 1 percent :%.4f" %(tot_1/total_samples))
+        print("output 0 percent :%.4f" %(tot_0/total_samples))
 
         if args.visualize and output_flag:
             from torch.utils.tensorboard import SummaryWriter
             writer = SummaryWriter(result_dir)
         else: writer = None
-
-        #for epoch in range(args.start_epoch, args.epochs[-1]):
+        dTNet.gate_nets[0].train()
         for epoch in range(args.start_epoch, args.epochs[-1]):
-            train_loss, train_acc = train(model, loss, epoch, train_loader, optimizer, schedule,
-                                        logger, train_logger, device, args.print_freq, attacker)
-            test_loss, test_acc = test(model, loss, epoch, test_loader, logger, test_logger, device, args.print_freq)
+
+            train_loss, train_acc = train(dTNet.gate_nets[0], loss, epoch, train_loader, optimizer, schedule,
+                                        logger, train_logger, device, args.print_freq, attacker, args.threshold)
+            test_loss, test_acc = test(dTNet.gate_nets[0], loss, epoch, test_loader, logger, test_logger, device, args.print_freq, args.threshold)
             if writer is not None:
-                writer.add_scalar('curve/p', get_p_norm(model), epoch)
+                writer.add_scalar('curve/p', get_p_norm(dTNet.gate_nets[0]), epoch)
                 writer.add_scalar('curve/train loss', train_loss, epoch)
                 writer.add_scalar('curve/test loss', test_loss, epoch)
                 writer.add_scalar('curve/train acc', train_acc, epoch)
@@ -195,44 +192,44 @@ def train_deepTrunk(dTNet, args, device, stats, train_loader, test_loader):
             if epoch % 50 == 49:
                 if logger is not None:
                     logger.print('Generate adversarial examples on training dataset and test dataset (fast, inaccurate) ')
-                robust_train_acc = gen_adv_examples(model,attacker, train_loader, device, logger, fast=True, threshold=0.5)
-                robust_test_acc = gen_adv_examples(model, attacker, test_loader, device, logger, fast=True, threshold=0.5)
+                robust_train_acc = gen_adv_examples(dTNet.gate_nets[0],attacker, train_loader, device, logger, fast=True, threshold=args.threshold , n_class =2)
+                robust_test_acc = gen_adv_examples(dTNet.gate_nets[0], attacker, test_loader, device, logger, fast=True, threshold=args.threshold, n_class =2)
                 if writer is not None:
                     writer.add_scalar('curve/robust train acc', robust_train_acc, epoch)
                     writer.add_scalar('curve/robust test acc', robust_test_acc, epoch)
             if epoch % 5 == 4:
-                certified_acc = certified_test(model, args.eps_test, up, down, test_loader, logger, device, threshold=0.5).float().mean().item()
+                certified_acc = certified_test(dTNet.gate_nets[0], args.eps_test, up, down, test_loader, logger, device, threshold=args.threshold, n_class =2).float().mean().item()
                 if writer is not None:
                     writer.add_scalar('curve/certified acc', certified_acc, epoch)
             if epoch > args.epochs[-1] - 3:
                 if logger is not None:
                     logger.print("Generate adversarial examples on test dataset")
-                gen_adv_examples(model, attacker, test_loader, device, logger, threshold=0.5)
+                gen_adv_examples(dTNet.gate_nets[0], attacker, test_loader, device, logger, threshold=args.threshold, n_class =2)
 
         schedule(args.epochs[-1], 0)
         
-        print("Calculate certified accuracy on training dataset and test dataset")
-        #certified_test(dTNet, args.eps_test, up, down,  train_loader, logger, device)
-        #certified_test(dTNet, args.eps_test, up, down,  test_loader, logger, device)
 
         torch.save({
-            'state_dict': model.state_dict(),
+            'state_dict': dTNet.gate_nets[0].state_dict(),
             'optimizer' : optimizer.state_dict(),
         }, os.path.join(result_dir, 'gate_model.pth'))
 
-@torch.no_grad()
+        
 def cert_deepTrunk_net(dTNet, args, device, data_loader, stats, log_ind=True, break_on_failure=False, epoch=None, domains=None):
 
     tot_trunk_corr = 0
     tot_gate_corr = 0
     tot_branch_corr = 0
     tot_samples = 0
-    tot_gate_0 = 0
-    tot_gate_1 = 0
+
     dTNet.trunk_net.eval()
     dTNet.gate_nets[0].eval()
     dTNet.branch_nets[0].eval()
-    ## 分别在测试集上测试trunk_net,branch_net的Acc
+    mean, std = get_statistics(args.dataset.upper())
+    up = torch.FloatTensor((1 - mean) / std).view(-1, 1, 1).to(device)
+    down = torch.FloatTensor((0 - mean) / std).view(-1, 1, 1).to(device)
+
+    ## test trunk_net,branch_net's Acc
     pbar = tqdm(data_loader, dynamic_ncols=True)
     for it, data in enumerate(pbar):
         if len(data)==2:
@@ -244,65 +241,26 @@ def cert_deepTrunk_net(dTNet, args, device, data_loader, stats, log_ind=True, br
         inputs, targets = inputs.to(device), targets.to(device)
 
         tot_samples += targets.size()[0]
-        trunk_out = dTNet.trunk_net(inputs)
-        tot_trunk_corr += cal_acc(trunk_out.data, targets, 0).float().sum().item()
-         
-        branch_out = dTNet.branch_nets[0](inputs)
-        tot_branch_corr += cal_acc(branch_out.data, targets, 0).float().sum().item()
-
-        gate_0_out =dTNet.gate_nets[0](inputs)
-        tot_gate_0 += cal_acc(gate_0_out.data, torch.zeros([targets.size()[0],1]).to(device),0.5).float().sum().item()
-        tot_gate_1 += cal_acc(gate_0_out.data, torch.ones([targets.size()[0],1]).to(device),0.5).float().sum().item()
-        #import pdb
-        #pdb.set_trace()
+        with torch.no_grad():
+            trunk_out = dTNet.trunk_net(inputs)
+        tot_trunk_corr += cal_acc(trunk_out.data, targets, threshold = args.threshold, n_class =10 ).float().sum().item()
+        with torch.no_grad():
+            branch_out = dTNet.branch_nets[0](inputs)
+        tot_branch_corr += cal_acc(branch_out.data, targets, threshold = args.threshold, n_class =10 ).float().sum().item()
     print("trunk_net nat_acc: %.4f, branch_net nat_acc: %.4f" %(tot_trunk_corr/tot_samples, tot_branch_corr/tot_samples))
-    print("gate_net 0_acc: %.4f, gate_net 1_acc: %.4f" %(tot_gate_0/tot_samples, tot_gate_1/tot_samples))
-    train_set_spec = MyVisionDataset.from_idx(data_loader.dataset, np.ones_like(data_loader.dataset.targets).astype(bool), train=True)
-    train_set_spec.set_weights(None)
-    train_loader_spec = torch.utils.data.DataLoader(train_set_spec, batch_size=args.train_batch,
-                                                    shuffle=True, num_workers=data_loader.num_workers, pin_memory=True, drop_last=True)
-    test_set_spec = MyVisionDataset.from_idx(data_loader.dataset,
-                                             np.ones_like(data_loader.dataset.targets).astype(bool), train=False)
-    test_set_spec.set_weights(None)
-    test_loader_spec = torch.utils.data.DataLoader(test_set_spec, batch_size=args.test_batch,
-                                                   shuffle=False, num_workers=data_loader.num_workers, pin_memory=True, drop_last=False)
-
-    train_loader, test_loader = get_gated_data_loaders(args, device,
-                                                                    dTNet.branch_nets[0],
-                                                                    train_loader_spec, test_loader_spec)
-
-    gate_predict =[]
-    gate_labels =[]
-    tot_samples = 0
-    pbar = tqdm(test_loader, dynamic_ncols=True)
-    for it, data in enumerate(pbar):
-        if len(data)==2:
-            inputs, targets = data
-            sample_weights = torch.ones(size=targets.size(),dtype=torch.float)
-        else:
-            inputs, targets, sample_weights = data
-
-        inputs, targets = inputs.to(device), targets.to(device)
-
-        tot_samples += targets.size()[0]
-        gate_out = dTNet.gate_nets[0](inputs)
-
-        tot_gate_corr += cal_acc(gate_out.data, targets,0.5).float().sum().item()
-        
-        gate_predict.append(gate_out.max(dim=1)[1])
-        gate_labels.append(targets)
-        
-    print("gate_net's natural acc:%.4f" %(tot_gate_corr/tot_samples))
     
     
-    n_exits = dTNet.n_branches
+
+    mean, std = get_statistics(args.dataset.upper())
+    up = torch.FloatTensor((1 - mean) / std).view(-1, 1, 1).to(device)
+    down = torch.FloatTensor((0 - mean) / std).view(-1, 1, 1).to(device)
+
+
+    
     tot_corr = 0
     tot_ver_corr = 0
     tot_adv_corr = 0
-    tot_samples = 0
-    img_id = 0    
-    adv_attack_test = AdvAttack(eps=args.eps_test, n_steps=20,
-                                step_size=args.eps_test / 4, adv_type="pgd")
+    tot_samples = 0 
 
     if log_ind:
         data_loader = torch.utils.data.DataLoader(data_loader.dataset, batch_size=data_loader.batch_size,
@@ -311,10 +269,11 @@ def cert_deepTrunk_net(dTNet, args, device, data_loader, stats, log_ind=True, br
         csv_log = open(os.path.join(args.model_dir, "cert_log.csv"), mode='w')
         log_writer = csv.writer(csv_log, delimiter=';', quotechar='"', quoting=csv.QUOTE_MINIMAL)
                         
-    
-    
-    pbar = tqdm(data_loader, dynamic_ncols=True)
+    attacker_gate = AttackPGD(dTNet.gate_nets[0], args.eps_test, step_size=args.eps_test / 4, num_steps=20, up=up, down=down)
+    attacker_branch = AttackPGD(dTNet.branch_nets[0], args.eps_test, step_size=args.eps_test / 4, num_steps=20, up=up, down=down)
+    attacker_trunk = AttackPGD(dTNet.trunk_net, args.eps_test, step_size=args.eps_test / 4, num_steps=20, up=up, down=down)    
 
+    pbar = tqdm(data_loader, dynamic_ncols=True)
     for it, data in enumerate(pbar):
         if len(data)==2:
             inputs, targets = data
@@ -322,50 +281,61 @@ def cert_deepTrunk_net(dTNet, args, device, data_loader, stats, log_ind=True, br
         else:
             inputs, targets, sample_weights = data
 
+            
         inputs, targets = inputs.to(device), targets.to(device)
-        
         tot_samples += inputs.size()[0]
-        nat_out, gate_out, exit_mask, nat_branches = dTNet(inputs)
 
-        if dTNet.trunk_net is None:
-            exit_mask[-2] = exit_mask[-2].__or__(exit_mask[-1])
-            exit_mask = exit_mask[:-1]
-        nat_ok = targets.eq(dTNet.evalFn(nat_out[torch.stack(exit_mask, dim=1)])).detach()
-        #_, adv_ok, _, _, adv_branches = dTNet.get_adv_loss(inputs, targets, adv_attack_test)
-        #select_mask_adv, min_gate_out, max_gate_out = dTNet.get_adv_loss(inputs, targets, adv_attack_test, mode="reachability")
-
-        #tot_select_hist += select_mask_adv.sum(dim=0).detach()
-        #tot_select_n += (torch.arange(1, n_exits + 2, device=device).unsqueeze(dim=0) == select_mask_adv.sum(
-        #    dim=1).unsqueeze(dim=1)).sum(dim=0).detach()
-
+        with torch.enable_grad():    
+            perturb_gate_1 = attacker_gate.find(inputs.clone(), torch.ones_like(targets).int())       
+            perturb_gate_0 = attacker_gate.find(inputs.clone(), torch.zeros_like(targets).int())              
+            perturb_trunk = attacker_trunk.find(inputs.clone(), targets.clone())              
+            perturb_branch = attacker_branch.find(inputs.clone(), targets.clone())
+    
         for n in range(inputs.shape[0]):
-            img_id += 1
             target = targets[n:n + 1]
             input_img = inputs[n:n + 1]
-            branch_p_aggregate = np.array([1 for _ in range(dTNet.n_branches + 1)])
-            cert_list = []
-            # gate_threshold_list = []
-
+            
             with torch.no_grad():
-                
-                branch_p = [1 for _ in range(dTNet.n_branches + 1)] # 0 => cant reach, 1 => reachable, 2 => cert, -1 => inccorect class cert
+                outputs = dTNet.branch_nets[0](perturb_branch[n:n+1])
+                predicted = torch.max(outputs.data, 1)[1]
+                adv_branch = (predicted == target).squeeze()  
 
-                branch_p, ver_corr, gate_thresholds = ai_cert_sample(dTNet, args ,input_img, target, branch_p, break_on_failure, args.eps_test, device)
+                outputs = dTNet.trunk_net(perturb_trunk[n:n+1])
+                predicted = torch.max(outputs.data, 1)[1]
+                adv_trunk = (predicted == target).squeeze()                    
 
-                tot_ver_corr += ver_corr.int().sum().item()
-                cert_list += [ver_corr.int().item()]
-                # gate_threshold_list += [gate_thresholds[x].item() for x in dTNet.exit_ids[1:]]
-                branch_p_idx = branch_p_aggregate == 1
-                branch_p_aggregate[branch_p_idx] = np.array(branch_p)[branch_p_idx]
+                choose = certify(dTNet.gate_nets[0], input_img, torch.ones_like(target.view(1,-1)).int(), args.eps_test, up, down, device , threshold=args.threshold, n_class =2).float().mean()
+                gate_out = dTNet.gate_nets[0](input_img)
+                choose = ((gate_out[0][1] - gate_out[0][0]).cpu() > args.threshold) & choose.cpu().bool() 
+
+                if choose == 1:
+                    certified_acc = certify(dTNet.branch_nets[0], input_img, target, args.eps_test, up, down, device , threshold = 0.0, n_class=10).float().mean()
+                    if certified_acc == 1:
+                        tot_ver_corr +=1 
+                    outputs = dTNet.branch_nets[0](input_img)
+                    tot_corr += (outputs.max(dim=1)[1] == target).float().mean()
+                    
+                    outputs = dTNet.gate_nets[0](perturb_gate_1[n:n+1])
+                    predicted = torch.max(outputs.data, 1)[1]
+                    adv_gate = (predicted == 1).squeeze()
+                    if adv_gate == 0:
+                        tot_adv_corr += adv_trunk & adv_branch
+                    else:
+                        tot_adv_corr += adv_branch
+                else:
+                    outputs = dTNet.trunk_net(input_img)
+                    tot_corr += (outputs.max(dim=1)[1] == target).float().mean()   
+                    outputs = dTNet.gate_nets[0](perturb_gate_0[n:n+1])
+                    predicted = torch.max(outputs.data, 1)[1]
+                    adv_gate = (predicted == 0).squeeze()
+                    if adv_gate == 0:
+                        tot_adv_corr += adv_trunk & adv_branch
+                    else:
+                        tot_adv_corr += adv_trunk     
+            
+    print('nat_corr:%.4f, adv_corr:%.4f, ver_corr:%.4f' %(tot_corr/tot_samples, tot_adv_corr.float()/tot_samples, tot_ver_corr/tot_samples))
 
 
-        tot_corr += nat_ok.int().sum().item()
-        #tot_adv_corr += adv_ok.int().sum().item()
-
-
-    print('nat_corr:%.4f, adv_corr:%.4f, ver_corr:%.4f' %(tot_corr/tot_samples, tot_adv_corr/tot_samples, tot_ver_corr/tot_samples))
-
-    
 def parse_function_call(s):
     s = re.split(r'[()]', s)
     if len(s) == 1:
@@ -386,23 +356,45 @@ def parse_function_call(s):
 def cross_entropy():
     return F.cross_entropy
 
+class LabelSmoothingLoss(nn.Module):
+    def __init__(self, classes, smoothing=0.0, dim=-1, weight = None):
+        super(LabelSmoothingLoss, self).__init__()
+        self.confidence = 1.0 - smoothing
+        self.smoothing = smoothing
+        self.weight = weight
+        self.cls = classes
+        self.dim = dim
+
+    def forward(self, pred, target, weight):
+        assert 0 <= self.smoothing < 1
+        pred = pred.log_softmax(dim=self.dim)
+
+
+        with torch.no_grad():
+            true_dist = torch.zeros_like(pred)
+            true_dist.fill_(self.smoothing / (self.cls - 1))
+            true_dist.scatter_(1, target.data.unsqueeze(1), self.confidence)
+        if self.weight is not None:
+            true_dist *= self.weight.unsqueeze(0)
+        return torch.mean(torch.sum(-true_dist * pred, dim=self.dim))
+
 # The hinge loss function is a combination of max_hinge_loss and average_hinge_loss.
-def hinge(mix=0.75):
+def hinge(mix=0.50):
     def loss_fun(outputs, targets):
         return mix * outputs.max(dim=1)[0].clamp(min=0).mean() + (1 - mix) * outputs.clamp(min=0).mean()
     return loss_fun
 
 class Loss():
-    def __init__(self, loss, kappa):
+    def __init__(self, loss, kappa ):
         self.loss = loss
         self.kappa = kappa
     def __call__(self, *args):
         margin_output = args[0] - torch.gather(args[0], dim=1, index=args[-1].view(-1, 1))
         if len(args) == 2:
             return self.loss(margin_output, args[-1])
-        # args[1] which corresponds to worse_outputs, is already a margin vector.
-        return self.kappa * self.loss(args[1], args[-1]) + (1 - self.kappa) * self.loss(margin_output, args[-1])
-
+        target  = args[-1].view(-1,1)
+        return  (1-self.kappa) * ((args[1][:,1]-args[1][:,0]).clamp(min=0).view(1,-1)*(1-target)).float().mean() + self.kappa * ((-args[1][:,1]+args[1][:,0]).clamp(min=0).view(1,-1)*(target)).float().mean()
+        
 def create_schedule(args, batch_per_epoch, model, loss, optimizer):
     epoch0, epoch1, epoch2, epoch3, tot_epoch = args.epochs
     speed = math.log(args.p_end / args.p_start)
@@ -417,29 +409,29 @@ def create_schedule(args, batch_per_epoch, model, loss, optimizer):
 
         ratio = min(max(num_batches(epoch - epoch1, minibatch) / num_batches(epoch3 - epoch1), 0), 1)
 
-        if ratio >= 1:
-            p_norm = float('inf')
-        else:
-            p_norm = args.p_start * math.exp(speed * ratio)
+        #if ratio >= 1:
+        p_norm = float('inf')
+        #else:
+        #    p_norm = args.p_start * math.exp(speed * ratio)
         set_p_norm(model, p_norm)
 
         if epoch2 > 0:
             ratio = min(max(num_batches(epoch - epoch0, minibatch) / num_batches(epoch2), 0), 1)
         else:
             ratio = 1.0
-        set_eps(model, args.eps_train * ratio)
+        set_eps(model, args.eps_train)
         loss.kappa = args.kappa
 
     return schedule
 
-def train(net, loss_fun, epoch, trainloader, optimizer, schedule, logger, train_logger, device, print_freq, attacker):
+def train(net, loss_fun, epoch, trainloader, optimizer, schedule, logger, train_logger, device, print_freq, attacker, threshold):
     if logger is not None:
         logger.print('Epoch %d training start' % (epoch))
     net.train()
     batch_time, data_time, losses, accs = [AverageMeter() for _ in range(4)]
     start = time.time()
     train_loader_len = len(trainloader)
-
+    #count_vars(net)
     for batch_idx, data in enumerate(trainloader):
         if len(data)==2:
             inputs, targets = data
@@ -451,19 +443,12 @@ def train(net, loss_fun, epoch, trainloader, optimizer, schedule, logger, train_
         inputs = inputs.to(device)
         targets = targets.to(device)
 
-        #perturb = attacker.find(inputs, targets)
-        #outputs = net(inputs)
-        #outputs, worse_outputs = net(perturb, targets=targets.long())
         outputs, worse_outputs = net(inputs, targets=targets.long())
         loss = loss_fun(outputs, worse_outputs, targets.long())
-        import pdb
-        pdb.set_trace()
-        #loss = torch.nn.functional.cross_entropy(outputs,targets.long())
-        #loss = loss_fun(outputs,targets.long())
-        #print(loss.size())
+
         with torch.no_grad():
             losses.update(loss.data.item(), targets.size(0))
-            accs.update(cal_acc(outputs.data, targets, threshold = 0.5 ).float().mean().item(), targets.size(0))
+            accs.update(cal_acc(outputs.data, targets, threshold=threshold, n_class =2 ).float().mean().item(), targets.size(0))
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -493,12 +478,16 @@ def train(net, loss_fun, epoch, trainloader, optimizer, schedule, logger, train_
     return loss, acc
 
 @torch.no_grad()
-def test(net, loss_fun, epoch, testloader, logger, test_logger, device, print_freq):
+def test(net, loss_fun, epoch, testloader, logger, test_logger, device, print_freq, threshold):
     net.eval()
     batch_time, data_time, losses, accs = [AverageMeter() for _ in range(4)]
     start = time.time()
     test_loader_len = len(testloader)
-
+    tot_1 = 0
+    tot_0 = 0
+    acc_1 = 0
+    acc_0 = 0
+    tot_samples = 0
     for batch_idx, data in enumerate(testloader):
         if len(data)==2:
             inputs, targets = data
@@ -508,10 +497,16 @@ def test(net, loss_fun, epoch, testloader, logger, test_logger, device, print_fr
         inputs = inputs.to(device)
         targets = targets.to(device)
         outputs = net(inputs)
-        #loss = torch.nn.functional.cross_entropy(outputs,targets.long())
+
         loss = loss_fun(outputs,targets.long())
+
         losses.update(loss.mean().item(), targets.size(0))
-        accs.update(cal_acc(outputs, targets, threshold =0.5).float().mean().item(), targets.size(0))
+        accs.update(cal_acc(outputs, targets, threshold=threshold, n_class =2 ).float().mean().item(), targets.size(0))
+        tot_samples +=targets.size()[0]
+        tot_1 += (outputs.max(dim=1)[1] == 1).float().sum().item()
+        tot_0 += (outputs.max(dim=1)[1] == 0).float().sum().item()
+        acc_1 += ((outputs.max(dim=1)[1]==1) & (targets == 1)).float().sum().item()
+        acc_0 += ((outputs.max(dim=1)[1]==0) & (targets == 0)).float().sum().item()
         batch_time.update(time.time() - start)
         start = time.time()
         if (batch_idx + 1) % print_freq == 0 and logger is not None:
@@ -527,7 +522,15 @@ def test(net, loss_fun, epoch, testloader, logger, test_logger, device, print_fr
         test_logger.log({'epoch': epoch, 'loss': loss, 'acc': acc})
     if logger is not None:
         logger.print('Epoch %d:  '%epoch + 'test loss  ' + f'{loss:.4f}' + '   acc ' + f'{acc:.4f}')
+    print("percent_1:%.4f" %(tot_1/tot_samples))
+    print("percent_0:%.4f" %(tot_0/tot_samples))
+    print("acc_1:%.4f" %(acc_1/(tot_samples)))
+    print("acc_0:%.4f" %(acc_0/(tot_samples)))
     return loss, acc
+
+
+
+
 
 def get_gated_data_loaders(args, device, net, train_loader, test_loader, threshold=0):
 
@@ -540,7 +543,9 @@ def get_gated_data_loaders(args, device, net, train_loader, test_loader, thresho
     return gate_train_loader, gate_test_loader
 
 def get_gated_data(args, device, net, data_loader,is_train=True, threshold=0):
-
+    save_p = get_p_norm(net)
+    set_p_norm(net, float('inf'))
+    net.eval()
     class_list = None
 
     data_set_tmp = MyVisionDataset.from_idx(data_loader.dataset, np.ones_like(data_loader.dataset.targets).astype(bool))
@@ -553,70 +558,56 @@ def get_gated_data(args, device, net, data_loader,is_train=True, threshold=0):
     up = torch.FloatTensor((1 - mean) / std).view(-1, 1, 1).to(device)
     down = torch.FloatTensor((0 - mean) / std).view(-1, 1, 1).to(device)
 
-    if is_train:
-        threshold_cert = certified_test(net, args.eps_train, up, down, data_loader, None, device, threshold=threshold)
-    else:
-        threshold_cert = certified_test(net, args.eps_test, up, down, data_loader, None, device, threshold=threshold)
-    #print(threshold_cert)
-    #print(threshold_cert)
-    #gate_target = (threshold_cert > threshold).cpu().detach()
 
-    print("Branch_net's certified_acc: %.4f" %(threshold_cert.float().mean().item()))
+    if is_train:
+        threshold_cert = certified_test(net, args.eps_test/2, up, down, data_loader, None, device, threshold=threshold, n_class =10)
+    else:
+        threshold_cert = certified_test(net, args.eps_test, up, down, data_loader, None, device, threshold=threshold, n_class =10)
+
+        
 
     gate_target = threshold_cert.cpu()
-    #gate_target = torch.nn.functional.one_hot(threshold_cert.cpu().detach().long(),num_classes=2).view(-1,2)
-    #print(gate_target)
+    print("gate_percent:%.4f" %(gate_target.float().mean()))
 
     data_set = MyVisionDataset.from_idx_and_targets(data_loader.dataset, torch.ones_like(gate_target).numpy(),
                                                         gate_target.float(), ["gate_easy_cert", "gate_difficult_cert"])
                                 
+  
     if len(data_set) == 0:
         return None, class_list
     else:
         return torch.utils.data.DataLoader(data_set, batch_size=args.train_batch if is_train else args.test_batch,
-                                       shuffle=True if is_train else False, num_workers=data_loader.num_workers,
+                                       shuffle=-1 if is_train else False, num_workers=data_loader.num_workers,
                                        pin_memory=True, drop_last=False), class_list
+    set_p_norm(net, save_p)
 
-def cal_acc(outputs, targets, threshold = 0.5):
-    if threshold == 0:
+def cal_acc(outputs, targets, threshold = 0.0, n_class = 2):
+    if n_class != 2:
         return (outputs.max(dim=1)[1] == targets)
     else:
-        predicted = F.softmax(outputs,1)
-        #print(predicted.size())
-        #print(predicted[0])
-        predicted = outputs[:,1]> threshold
-        #predicted = outputs.max(dim=1)[1]
-        #print(predicted == targets)
+        predicted = (outputs[:,1] - outputs[:,0]) > threshold 
         return (predicted == targets)
 
-def certify(net, inputs, targets ,eps, up, down, device, threshold=0):
+def certify(net, inputs, targets ,eps, up, down, device, threshold=0.0, n_class = 2):
     save_p = get_p_norm(net)
     save_eps = get_eps(net)
     set_eps(net, eps)
     set_p_norm(net, float('inf'))
     net.eval()
-    outputs = []
-    labels = []
 
-    #inputs = torch.squeeze(inputs,dim= 0)
+
     targets = torch.squeeze(targets, dim = 0)
-    
-
     lower = torch.max(inputs - eps, down)
     upper = torch.min(inputs + eps, up)
+    outputs=net(inputs, lower=lower, upper=upper, targets=targets.long())[1]
+    labels=targets
 
-    outputs.append(net(inputs, lower=lower, upper=upper, targets=targets.long())[1])
-    labels.append(targets)
 
-    outputs = torch.cat(outputs, dim=0)
-    labels = torch.cat(labels, dim=0)
-
-    if threshold == 0:
+    if n_class != 2:
         res = (outputs.max(dim=1)[1] == labels)
     else:
-        predicted = F.softmax(outputs,1)
-        #print(predicted.size())
-        predicted = outputs[:,1] > threshold
+    
+        predicted = (outputs[:,1] - outputs[:,0]) > threshold 
         res = (predicted==labels)
 
     set_p_norm(net, save_p)
@@ -624,7 +615,7 @@ def certify(net, inputs, targets ,eps, up, down, device, threshold=0):
 
     return res
 
-def certified_test(net, eps, up, down, testloader, logger, device, threshold=0):
+def certified_test(net, eps, up, down, testloader, logger, device, threshold=0.0, n_class = 2):
     save_p = get_p_norm(net)
     save_eps = get_eps(net)
     set_eps(net, eps)
@@ -645,125 +636,26 @@ def certified_test(net, eps, up, down, testloader, logger, device, threshold=0):
         lower = torch.max(inputs - eps, down)
         upper = torch.min(inputs + eps, up)
 
-        #output = net(inputs, targets=targets.long())
-        #import pdb
-        #pdb.set_trace()
-
         outputs.append(net(inputs, lower=lower, upper=upper, targets=targets.long())[1])
         labels.append(targets)
-
         
         
     outputs = torch.cat(outputs, dim=0)
     labels = torch.cat(labels, dim=0)
-
-    if threshold == 0:
+    if n_class != 2:
         res = (outputs.max(dim=1)[1] == labels)
     else:
-        predicted = F.softmax(outputs,1)
-        #print(predicted.size())
-        predicted = outputs[:,1] > threshold
+        predicted = (outputs[:,1] - outputs[:,0]) > threshold 
         res = (predicted==labels)
 
     if logger is not None:
         logger.print(' certified acc ' + f'{res.float().mean().item():.4f}')
-        
+
     set_p_norm(net, save_p)
     set_eps(net, save_eps)
     return res
 
-
-def ai_cert_sample(dTNet, args, inputs, target, branch_p, break_on_failure, eps, device, cert_trunk=False):
-    dTNet.eval()
-    ver_corr = torch.ones_like(target).byte()
-    ver_not_trunk = False
-    gate_threshold_s = {}
-    n_class = 2
-    mean, std = get_statistics(args.dataset.upper())
-
-    up = torch.FloatTensor((1 - mean) / std).view(-1, 1, 1).to(device)
-    down = torch.FloatTensor((0 - mean) / std).view(-1, 1, 1).to(device)
-
-    for k, exit_idx in enumerate(dTNet.exit_ids[1:]):
-        if branch_p[k+1] == 0:
-            ver_not_trunk = False
-            ver_not_branch = True
-            continue
-
-
-
-        ver_not_branch = certify(dTNet.gate_nets[exit_idx], inputs, torch.zeros_like(target.view(1,-1)).int(), eps, up, down, device , threshold = 0.5)
-
-        ver_not_trunk = certify(dTNet.gate_nets[exit_idx], inputs, torch.ones_like(target.view(1,-1)).int(), eps, up, down, device , threshold = 0.5)
-
-
-        #print(ver_not_branch)
-        #print(ver_not_trunk)
-        if ver_not_branch:
-            # Sample can not reach branch
-            branch_p[k + 1] = 0
-        else:
-            # Sample can reach branch
-            if branch_p[k+1] == 2:
-                # Already certified
-                ver_corr_branch = torch.ones_like(target).byte()
-                # ver = torch.ones_like(target).byte()
-            elif branch_p[k+1] == -1:
-                # Already certified as incorrect
-                ver_corr_branch = torch.zeros_like(target).byte()
-                # ver = torch.ones_like(target).byte()
-            else:
-                branch_p[k + 1] = 1
-
-                ver_corr_branch = certify(dTNet.branch_nets[exit_idx], inputs, torch.ones_like(target.view(1,-1)).int(), eps, up, down,device , threshold = 0.0)
-    
-                ver_corr_branch = ver_corr_branch.byte()
-                # ver_branch = ver_branch.byte()
-
-
-                if ver_corr_branch:
-                    branch_p[k + 1] = 2
-                # elif ver_branch:
-                #     branch_p[k + 1] = -1
-            # ver corr if all reachable branches are correct
-            ver_corr = ver_corr_branch & ver_corr
-
-        if ver_not_trunk:
-            # Will definitely branch => all later branches cannot be reached
-            branch_p[0] = 0
-            if k+2 < len(branch_p):
-                for i, reachability in enumerate(branch_p[k+2:]):
-                    branch_p[k + 2 + i] = 0
-            break
-
-        if not ver_corr and break_on_failure:
-            # assume that all branches can be reached if the opposite was not certified
-            if not ver_not_trunk:
-                for i, reachability in enumerate(branch_p[k+1:]):
-                    if reachability == 0:
-                        branch_p[k + 1 + i] = 1
-            break
-
-    if not ver_not_trunk and not branch_p[0] == 0:
-        if cert_trunk:
-            if ver_corr or not break_on_failure:
-                #try:
-                ver_corr_trunk, threshold_n, _ = dTNet.trunk_cnet.get_abs_loss(inputs, target, eps, 'box', dTNet.trunk_cnet.threshold_min,beta=1)
-                if ver_corr_trunk:
-                    branch_p[0] = 2
-                # elif ver_trunk:
-                #     branch_p[0] = -1
-                ver_corr = ver_corr_trunk & ver_corr
-                #except:
-                #    warn("Certification of trunk failed critically.")
-                #    ver_corr[:] = False
-
-
-    #print(ver_corr)
-    return branch_p, ver_corr, gate_threshold_s
-
-
-def gen_adv_examples(model, attacker, test_loader, device, logger, fast=False , threshold=0.5):
+def gen_adv_examples(model, attacker, test_loader, device, logger, fast=False , threshold=0.0, n_class = 2):
     model.eval()
     correct = 0
     tot_num = 0
@@ -783,9 +675,7 @@ def gen_adv_examples(model, attacker, test_loader, device, logger, fast=False , 
             perturb = attacker.find(inputs, targets)
             with torch.no_grad():
                 outputs = model(perturb)
-                predicted = F.softmax(outputs,1)
-                predicted = outputs[:,1]> threshold 
-                #predicted = outputs.max(dim=1)[1]
+                predicted = (outputs[:,1] - outputs[:,0]) > threshold 
                 result &= (predicted == targets)
         correct += result.float().sum().item()
         tot_num += inputs.size(0)
